@@ -1,0 +1,108 @@
+# ============================================================================
+# Ganimation Studio - Docker Compose (Development)
+# Hot-reload enabled for development
+# ============================================================================
+
+version: "3.9"
+
+services:
+  # ==========================================================================
+  # API Service - Development Mode
+  # ==========================================================================
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: ganimation-api-dev
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    environment:
+      - CUDA_VISIBLE_DEVICES=0,1
+      - NVIDIA_TF32_OVERRIDE=1
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - LOG_LEVEL=debug
+      - DEBUG=true
+      - DATA_DIR=/data
+      - MODELS_DIR=/data/models
+    
+    volumes:
+      # Mount source code for hot-reload
+      - ./api:/app/api
+      - ./utils:/app/utils
+      - ./config.py:/app/config.py
+      # Data volumes
+      - ./data/gallery:/data/gallery
+      - ./data/temp:/data/temp
+      - ./data/models:/data/models
+    
+    ports:
+      - "8000:8000"
+    
+    networks:
+      - ganimation-dev
+    
+    # Development command with reload
+    command: >
+      python -m uvicorn api.main:app 
+      --host 0.0.0.0 
+      --port 8000 
+      --reload 
+      --reload-dir /app/api
+      --log-level debug
+
+  # ==========================================================================
+  # Frontend Service - Development Mode
+  # ==========================================================================
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: ganimation-frontend-dev
+    
+    environment:
+      - API_URL=http://api:8000
+      - STREAMLIT_SERVER_RUN_ON_SAVE=true
+      - STREAMLIT_THEME_BASE=dark
+    
+    volumes:
+      # Mount source code for hot-reload
+      - ./app.py:/app/app.py
+      - ./pages:/app/pages
+      - ./utils:/app/utils
+      - ./config.py:/app/config.py
+      # Data (read-only)
+      - ./data/gallery:/data/gallery:ro
+    
+    ports:
+      - "8501:8501"
+    
+    networks:
+      - ganimation-dev
+    
+    depends_on:
+      - api
+
+  # ==========================================================================
+  # Redis - Development
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: ganimation-redis-dev
+    ports:
+      - "6379:6379"
+    networks:
+      - ganimation-dev
+
+networks:
+  ganimation-dev:
+    driver: bridge
+

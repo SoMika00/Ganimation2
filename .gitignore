@@ -1,0 +1,90 @@
+# ============================================================================
+# Ganimation Studio - Git Ignore
+# ============================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+*.egg
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Virtual environments
+venv/
+env/
+.env
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-*
+
+# Data directories
+data/
+gallery/source_media/*
+gallery/generated_images/*
+gallery/generated_videos/*
+temp/*
+models/*
+!gallery/.gitkeep
+!temp/.gitkeep
+!models/.gitkeep
+
+# Keep directory structure
+!gallery/source_media/.gitkeep
+!gallery/generated_images/.gitkeep
+!gallery/generated_videos/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# Docker
+docker-compose.override.yml
+
+# Secrets
+.env
+.env.local
+.env.production
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Misc
+*.bak
+*.tmp
+*.temp
+
+# Large model files
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Node (if any frontend tooling)
+node_modules/
+

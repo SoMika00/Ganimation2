@@ -1,0 +1,86 @@
+# ============================================================================
+# Ganimation Studio - API Service
+# FastAPI backend for video/image processing
+# ============================================================================
+
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+LABEL maintainer="Ganimation Studio"
+LABEL service="api"
+
+# Environment
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PIP_NO_CACHE_DIR=1
+
+# CUDA for H100
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+ENV TORCH_CUDA_ARCH_LIST="9.0"
+ENV NVIDIA_TF32_OVERRIDE=1
+
+# PyTorch optimizations
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3-pip \
+    ffmpeg \
+    libsm6 \
+    libxext6 \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+
+# Create user and directories
+RUN useradd -m -s /bin/bash ganimation \
+    && mkdir -p /app /data/gallery /data/temp /data/models \
+    && chown -R ganimation:ganimation /app /data
+
+WORKDIR /app
+
+# Upgrade pip
+RUN pip3 install --upgrade pip setuptools wheel
+
+# Install PyTorch with CUDA 12.1
+RUN pip3 install \
+    torch==2.2.0 \
+    torchvision==0.17.0 \
+    torchaudio==2.2.0 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# Install xformers
+RUN pip3 install xformers==0.0.24
+
+# Copy and install requirements
+COPY requirements-api.txt requirements-ml.txt ./
+RUN pip3 install -r requirements-api.txt -r requirements-ml.txt
+
+# Copy application code
+COPY api/ ./api/
+COPY utils/ ./utils/
+COPY config.py ./
+
+# Create volumes mount points
+VOLUME ["/data/gallery", "/data/temp", "/data/models"]
+
+# Switch to non-root user
+USER ganimation
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Expose API port
+EXPOSE 8000
+
+# Run API server
+CMD ["python", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+

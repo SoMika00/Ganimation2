@@ -1,0 +1,60 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+.eggs
+*.egg
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Virtual environments
+venv
+env
+.env
+.venv
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Data directories (mounted as volumes)
+data/
+gallery/
+temp/
+models/
+
+# Build artifacts
+*.log
+*.tmp
+dist/
+build/
+
+# Docker
+docker-compose.override.yml
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Tests
+tests/
+*.test.py
+conftest.py
+
+# Misc
+.DS_Store
+Thumbs.db
+*.bak
+

@@ -1,0 +1,71 @@
+# ============================================================================
+# Ganimation Studio - Dependencies
+# Optimized for 2x NVIDIA H100 (160GB VRAM)
+# ============================================================================
+
+# Core Framework
+streamlit>=1.28.0
+
+# Video Processing
+yt-dlp>=2024.1.0
+ffmpeg-python>=0.2.0
+
+# Image Processing
+Pillow>=10.0.0
+opencv-python>=4.8.0
+
+# ============================================================================
+# AI/ML - PyTorch (CUDA 12.1 for H100)
+# Install separately: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# ============================================================================
+torch>=2.2.0
+torchvision>=0.17.0
+torchaudio>=2.2.0
+
+# ============================================================================
+# Diffusion Models
+# ============================================================================
+diffusers>=0.25.0
+transformers>=4.36.0
+accelerate>=0.25.0
+safetensors>=0.4.0
+
+# ControlNet & Preprocessing
+controlnet-aux>=0.0.7
+
+# ============================================================================
+# H100 Optimizations
+# ============================================================================
+# xFormers - Memory efficient attention
+xformers>=0.0.23
+
+# Flash Attention 2 (install separately for H100)
+# pip install flash-attn --no-build-isolation
+
+# BitsAndBytes for quantization (optional)
+bitsandbytes>=0.41.0
+
+# ============================================================================
+# Utilities
+# ============================================================================
+numpy>=1.24.0
+tqdm>=4.66.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+einops>=0.7.0
+
+# ============================================================================
+# Optional - Video Enhancement
+# ============================================================================
+# RIFE Frame Interpolation
+# basicsr>=1.4.2
+
+# Real-ESRGAN Upscaling
+# realesrgan>=0.3.0
+
+# ============================================================================
+# Development
+# ============================================================================
+# pytest>=7.0.0
+# black>=23.0.0
+# ruff>=0.1.0
