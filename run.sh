@@ -18,6 +18,73 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+MODE="docker"
+DETACHED=""
+BUILD="--build"
+
+for arg in "$@"; do
+    case "$arg" in
+        docker|local)
+            MODE="$arg"
+            ;;
+        -d|--detached)
+            DETACHED="-d"
+            ;;
+        --build)
+            BUILD="--build"
+            ;;
+        --no-build)
+            BUILD=""
+            ;;
+        --help|-h)
+            MODE="--help"
+            ;;
+        *)
+            ;;
+    esac
+done
+
+if [ "$MODE" = "--help" ] || [ "$MODE" = "-h" ]; then
+    echo "Usage: ./run.sh [docker|local]"
+    echo "  docker (default): start ComfyUI + Studio via docker compose"
+    echo "  local: start Streamlit locally (does NOT start ComfyUI)"
+    echo "  -d, --detached: run in detached mode"
+    echo "  --build: rebuild Docker images (default in docker mode; uses cache)"
+    echo "  --no-build: start containers without rebuilding"
+    exit 0
+fi
+
+if [ "$MODE" = "docker" ]; then
+    echo -e "${CYAN}🐳 Starting Docker stack (Studio + ComfyUI)...${NC}"
+
+    export HOST_UID="$(id -u)"
+    export HOST_GID="$(id -g)"
+
+    # Create persistent host directories
+    mkdir -p \
+        data/comfyui/{models,output,input,user,custom_nodes} \
+        gallery/{source_media,generated_images,generated_videos} \
+        temp \
+        models
+
+    if docker compose version &> /dev/null; then
+        DOCKER_COMPOSE="docker compose"
+    elif command -v docker-compose &> /dev/null; then
+        DOCKER_COMPOSE="docker-compose"
+    else
+        echo -e "${RED}❌ Docker Compose not found. Install docker compose.${NC}"
+        exit 1
+    fi
+
+    if ! docker info 2>/dev/null | grep -qi "nvidia"; then
+        echo -e "${YELLOW}⚠️  NVIDIA runtime not detected in Docker. GPU may not be available inside containers.${NC}"
+        echo -e "${YELLOW}   Install nvidia-container-toolkit and restart Docker.${NC}"
+    fi
+
+    $DOCKER_COMPOSE -f docker-compose.studio.yml up $DETACHED $BUILD
+    exit 0
+fi
+
 echo -e "${PURPLE}"
 echo "╔═══════════════════════════════════════════════════════════════╗"
 echo "║           🎬 GANIMATION STUDIO                                ║"

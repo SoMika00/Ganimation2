@@ -43,6 +43,30 @@
 
 ## Quick Start
 
+### Minimal Studio + ComfyUI (Recommended)
+
+This mode runs only:
+- Streamlit Studio (UI)
+- ComfyUI (image generation backend)
+
+```bash
+cd Ganimation2
+./run.sh
+```
+
+URLs:
+- Studio: http://localhost:8501
+- ComfyUI: http://localhost:8188
+
+Persistence (host folders):
+- ComfyUI models: `./data/comfyui/models/`
+- ComfyUI output: `./data/comfyui/output/`
+- ComfyUI input: `./data/comfyui/input/`
+- ComfyUI workflows/settings: `./data/comfyui/user/`
+- ComfyUI plugins: `./data/comfyui/custom_nodes/`
+
+If your workflows disappear after rebuild/restart, it's because `user/` was not persisted. This repo now mounts it.
+
 ### Prerequisites
 
 ```bash

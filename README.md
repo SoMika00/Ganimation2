@@ -22,20 +22,23 @@
 ### Option 1: Docker (Recommended)
 
 ```bash
-# Clone the repository
-git clone https://github.com/your-repo/Ganimation2.git
 cd Ganimation2
 
-# Copy environment file
-cp env.example .env
-
-# Start with Docker
-./scripts/docker-start.sh dev
+# Start Studio (Streamlit) + ComfyUI
+./run.sh
 ```
 
 Access:
-- **Web UI**: http://localhost:8501
-- **API Docs**: http://localhost:8000/docs
+- **Studio (Streamlit)**: http://localhost:8501
+- **ComfyUI UI**: http://localhost:8188
+
+Persistent storage (host):
+- `./gallery/` (source videos + generated outputs)
+- `./temp/`
+- `./models/` (non-ComfyUI models used by the app)
+- `./data/comfyui/models/` (ComfyUI models: checkpoints / loras / controlnet / etc.)
+- `./data/comfyui/custom_nodes/` (ComfyUI plugins)
+- `./data/comfyui/user/` (ComfyUI workflows + settings)
 
 ### Option 2: Local Development
 
@@ -48,8 +51,10 @@ source venv/bin/activate
 pip install -r requirements.txt
 
 # Run the app
-./run.sh
+./run.sh local
 ```
+
+Note: local mode does **not** start ComfyUI. If you run locally, start ComfyUI separately.
 
 ## 📁 Project Structure
 
@@ -58,8 +63,9 @@ Ganimation2/
 ├── app.py                    # Streamlit application
 ├── config.py                 # Configuration management
 ├── run.sh                    # Local run script
-├── docker-compose.yml        # Production Docker setup
-├── docker-compose.dev.yml    # Development Docker setup
+├── docker-compose.yml        # API/worker stack (advanced)
+├── docker-compose.dev.yml    # API/worker stack (advanced)
+├── docker-compose.studio.yml # Minimal Studio + ComfyUI
 │
 ├── api/                      # FastAPI Backend
 │   ├── main.py               # API entry point
@@ -75,7 +81,7 @@ Ganimation2/
 │       ├── generation_service.py
 │       └── gpu_manager.py
 │
-├── pages/                    # Streamlit pages
+├── views/                    # Streamlit views/pages
 │   ├── ingestion.py          # Video import UI
 │   ├── gallery.py            # Media browser UI
 │   ├── image_studio.py       # Image generation UI
@@ -172,6 +178,10 @@ Ganimation2/
 - CFG: 5.0
 - LoRA Weight: 0.75
 - Batch Size: 4
+
+Implementation note:
+- The ComfyUI workflow is generated dynamically in `utils/comfyui_client.py` and executed via the ComfyUI HTTP API.
+- That means you won't see a pre-saved graph in ComfyUI unless you build/import one yourself.
 
 ### Video Generation
 
