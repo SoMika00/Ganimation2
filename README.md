@@ -40,6 +40,13 @@ Persistent storage (host):
 - `./data/comfyui/custom_nodes/` (ComfyUI plugins)
 - `./data/comfyui/user/` (ComfyUI workflows + settings)
 
+ComfyUI model placement (host):
+- LoRAs: `./data/comfyui/models/loras/`
+- Checkpoints: `./data/comfyui/models/checkpoints/`
+- ControlNet: `./data/comfyui/models/controlnet/`
+
+To move to another VM, copy `./data/comfyui/models`, `./data/comfyui/custom_nodes`, and `./data/comfyui/user`.
+
 ### Option 2: Local Development
 
 ```bash

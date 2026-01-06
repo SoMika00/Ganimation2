@@ -21,6 +21,7 @@ cd "$SCRIPT_DIR"
 MODE="docker"
 DETACHED=""
 BUILD="--build"
+BOOTSTRAP_ONLY="0"
 
 for arg in "$@"; do
     case "$arg" in
@@ -35,6 +36,9 @@ for arg in "$@"; do
             ;;
         --no-build)
             BUILD=""
+            ;;
+        --bootstrap-only)
+            BOOTSTRAP_ONLY="1"
             ;;
         --help|-h)
             MODE="--help"
@@ -60,12 +64,270 @@ if [ "$MODE" = "docker" ]; then
     export HOST_UID="$(id -u)"
     export HOST_GID="$(id -g)"
 
+    if [ -f ".env" ]; then
+        set -o allexport
+        # shellcheck disable=SC1091
+        source ".env"
+        set +o allexport
+    fi
+
     # Create persistent host directories
     mkdir -p \
         data/comfyui/{models,output,input,user,custom_nodes} \
         gallery/{source_media,generated_images,generated_videos} \
         temp \
         models
+
+    # Standard ComfyUI models layout (recommended)
+    mkdir -p \
+        data/comfyui/models/{checkpoints,loras,controlnet,vae,clip,clip_vision,upscale_models,embeddings,hypernetworks}
+
+    mkdir -p \
+        data/comfyui/models/{diffusion_models,text_encoders,sam2,grounding-dino,detection}
+
+    mkdir -p data/comfyui/models/pulid
+
+    AUTO_BOOTSTRAP="${AUTO_BOOTSTRAP:-1}"
+    AUTO_DOWNLOAD_MODELS="${AUTO_DOWNLOAD_MODELS:-1}"
+    AUTO_INSTALL_CUSTOM_NODES="${AUTO_INSTALL_CUSTOM_NODES:-1}"
+
+    BOOTSTRAP_WARNINGS=0
+
+    download_if_missing() {
+        local url="$1"
+        local dest="$2"
+
+        if [ -f "$dest" ]; then
+            return 0
+        fi
+
+        mkdir -p "$(dirname "$dest")"
+        echo -e "${BLUE}⬇️  Downloading: $(basename "$dest")${NC}"
+
+        if command -v curl >/dev/null 2>&1; then
+            local -a auth_args=()
+            if [ -n "${HF_TOKEN:-}" ] && echo "$url" | grep -qi "huggingface.co"; then
+                auth_args=(-H "Authorization: Bearer ${HF_TOKEN}")
+            fi
+
+            if ! curl -L --fail --retry 3 --retry-delay 2 "${auth_args[@]}" -o "${dest}.part" "$url"; then
+                echo -e "${YELLOW}⚠️  Download failed for $(basename "$dest") (URL: $url)${NC}"
+                rm -f "${dest}.part" 2>/dev/null || true
+                return 1
+            fi
+        elif command -v wget >/dev/null 2>&1; then
+            local -a auth_args=()
+            if [ -n "${HF_TOKEN:-}" ] && echo "$url" | grep -qi "huggingface.co"; then
+                auth_args=(--header="Authorization: Bearer ${HF_TOKEN}")
+            fi
+
+            if ! wget -q --show-progress "${auth_args[@]}" -O "${dest}.part" "$url"; then
+                echo -e "${YELLOW}⚠️  Download failed for $(basename "$dest") (URL: $url)${NC}"
+                rm -f "${dest}.part" 2>/dev/null || true
+                return 1
+            fi
+        else
+            echo -e "${YELLOW}⚠️  Missing downloader (curl or wget). Skipping auto-download of $(basename "$dest").${NC}"
+            return 1
+        fi
+
+        mv "${dest}.part" "$dest"
+        return 0
+    }
+
+    download_hf_if_missing() {
+        local repo_id="$1"
+        local repo_path="$2"
+        local dest="$3"
+
+        if [ -f "$dest" ]; then
+            return 0
+        fi
+
+        mkdir -p "$(dirname "$dest")"
+        echo -e "${BLUE}⬇️  Downloading: $(basename "$dest")${NC}"
+
+        local url="https://huggingface.co/${repo_id}/resolve/main/${repo_path}"
+
+        if command -v curl >/dev/null 2>&1; then
+            local -a auth_args=()
+            if [ -n "${HF_TOKEN:-}" ]; then
+                auth_args=(-H "Authorization: Bearer ${HF_TOKEN}")
+            fi
+
+            if ! curl -L --fail --retry 3 --retry-delay 2 "${auth_args[@]}" -o "${dest}.part" "$url"; then
+                echo -e "${YELLOW}⚠️  Download failed for $(basename "$dest") (HF: $repo_id/$repo_path)${NC}"
+                rm -f "${dest}.part" 2>/dev/null || true
+                return 1
+            fi
+        else
+            echo -e "${YELLOW}⚠️  Missing downloader (curl). Skipping HF download of $(basename "$dest").${NC}"
+            return 1
+        fi
+
+        mv "${dest}.part" "$dest"
+        return 0
+    }
+
+    clone_if_missing() {
+        local repo_url="$1"
+        local dest_dir="$2"
+
+        if [ -d "$dest_dir/.git" ] || [ -f "$dest_dir/__init__.py" ] || [ -f "$dest_dir/pyproject.toml" ]; then
+            return 0
+        fi
+
+        mkdir -p "$(dirname "$dest_dir")"
+        echo -e "${BLUE}🔌 Installing custom node: $(basename "$dest_dir")${NC}"
+
+        if ! command -v git >/dev/null 2>&1; then
+            echo -e "${YELLOW}⚠️  git not found on host. Skipping install of $(basename "$dest_dir").${NC}"
+            return 1
+        fi
+
+        rm -rf "$dest_dir" 2>/dev/null || true
+        if ! git clone --depth 1 "$repo_url" "$dest_dir"; then
+            echo -e "${YELLOW}⚠️  Failed to clone $repo_url${NC}"
+            return 1
+        fi
+
+        return 0
+    }
+
+    if [ "$AUTO_BOOTSTRAP" = "1" ]; then
+        if [ "$AUTO_INSTALL_CUSTOM_NODES" = "1" ]; then
+            clone_if_missing "https://github.com/ltdrdata/ComfyUI-Manager.git" "data/comfyui/custom_nodes/ComfyUI-Manager" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+            clone_if_missing "https://github.com/Fannovel16/comfyui_controlnet_aux.git" "data/comfyui/custom_nodes/comfyui_controlnet_aux" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+            clone_if_missing "https://github.com/cubiq/PuLID_ComfyUI.git" "data/comfyui/custom_nodes/PuLID_ComfyUI" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            clone_if_missing "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git" "data/comfyui/custom_nodes/ComfyUI-VideoHelperSuite" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+            clone_if_missing "https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git" "data/comfyui/custom_nodes/ComfyUI-Frame-Interpolation" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+            clone_if_missing "https://github.com/kijai/ComfyUI-segment-anything-2.git" "data/comfyui/custom_nodes/ComfyUI-segment-anything-2" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+            clone_if_missing "https://github.com/brayevalerien/ComfyUI-resynthesizer.git" "data/comfyui/custom_nodes/ComfyUI-resynthesizer" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+            clone_if_missing "https://github.com/chaojie/ComfyUI-RAFT.git" "data/comfyui/custom_nodes/ComfyUI-RAFT" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            clone_if_missing "https://github.com/kijai/ComfyUI-WanVideoWrapper.git" "data/comfyui/custom_nodes/ComfyUI-WanVideoWrapper" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+            clone_if_missing "https://github.com/kijai/ComfyUI-WanAnimatePreprocess.git" "data/comfyui/custom_nodes/ComfyUI-WanAnimatePreprocess" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+            clone_if_missing "https://github.com/stuttlepress/ComfyUI-Wan-VACE-Prep.git" "data/comfyui/custom_nodes/ComfyUI-Wan-VACE-Prep" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+        fi
+
+        if [ "$AUTO_DOWNLOAD_MODELS" = "1" ]; then
+            download_if_missing \
+                "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors" \
+                "data/comfyui/models/checkpoints/sd_xl_base_1.0.safetensors" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_if_missing \
+                "https://huggingface.co/ntc-ai/SDXL-LoRA-slider.Studio-Ghibli-style/resolve/main/Studio%20Ghibli%20style.safetensors" \
+                "data/comfyui/models/loras/ghibli_style_sdxl.safetensors" \
+            || download_if_missing \
+                "https://huggingface.co/ntc-ai/SDXL-LoRA-slider.Studio-Ghibli-style/resolve/main/Studio+Ghibli+style.safetensors" \
+                "data/comfyui/models/loras/ghibli_style_sdxl.safetensors" \
+            || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_if_missing \
+                "https://huggingface.co/artificialguybr/StudioGhibli.Redmond-V2/resolve/main/StudioGhibli.Redmond-StdGBRRedmAF-StudioGhibli.safetensors" \
+                "data/comfyui/models/loras/StudioGhibli.Redmond-StdGBRRedmAF-StudioGhibli.safetensors" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_if_missing \
+                "https://huggingface.co/diffusers/controlnet-depth-sdxl-1.0/resolve/main/diffusion_pytorch_model.fp16.safetensors" \
+                "data/comfyui/models/controlnet/diffusers_xl_depth_full.safetensors" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_if_missing \
+                "https://huggingface.co/diffusers/controlnet-canny-sdxl-1.0/resolve/main/diffusion_pytorch_model.fp16.safetensors" \
+                "data/comfyui/models/controlnet/diffusers_xl_canny_full.safetensors" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_if_missing \
+                "https://huggingface.co/guozinan/PuLID/resolve/main/pulid_v1.1.safetensors" \
+                "data/comfyui/models/pulid/pulid_v1.1.safetensors" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_if_missing \
+                "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" \
+                "data/comfyui/models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" \
+            || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_if_missing \
+                "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors" \
+                "data/comfyui/models/vae/wan_2.1_vae.safetensors" \
+            || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_if_missing \
+                "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors" \
+                "data/comfyui/models/clip_vision/clip_vision_h.safetensors" \
+            || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_if_missing \
+                "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors" \
+                "data/comfyui/models/loras/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors" \
+            || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_if_missing \
+                "https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/Wan22Animate/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors" \
+                "data/comfyui/models/diffusion_models/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors" \
+            || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_hf_if_missing \
+                "Kijai/WanVideo_comfy" \
+                "LoRAs/Wan22_relight/WanAnimate_relight_lora_fp16.safetensors" \
+                "data/comfyui/models/loras/WanAnimate_relight_lora_fp16.safetensors" \
+            || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_hf_if_missing \
+                "Kijai/WanVideo_comfy" \
+                "LoRAs/Wan22_relight/WanAnimate_relight_lora_fp16_resized_from_128_to_dynamic_22.safetensors" \
+                "data/comfyui/models/loras/WanAnimate_relight_lora_fp16_resized_from_128_to_dynamic_22.safetensors" \
+            || true
+
+            AUTO_DOWNLOAD_WAN_MODELS="${AUTO_DOWNLOAD_WAN_MODELS:-0}"
+            if [ "$AUTO_DOWNLOAD_WAN_MODELS" = "1" ]; then
+                download_hf_if_missing \
+                    "Comfy-Org/Wan_2.2_ComfyUI_Repackaged" \
+                    "split_files/diffusion_models/wan2.2_animate_14B_bf16.safetensors" \
+                    "data/comfyui/models/diffusion_models/wan2.2_animate_14B_bf16.safetensors" \
+                || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+                download_hf_if_missing \
+                    "Comfy-Org/Wan_2.2_ComfyUI_Repackaged" \
+                    "split_files/diffusion_models/wan2.2_fun_control_high_noise_14B_bf16.safetensors" \
+                    "data/comfyui/models/diffusion_models/wan2.2_fun_control_high_noise_14B_bf16.safetensors" \
+                || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+                download_hf_if_missing \
+                    "Comfy-Org/Wan_2.2_ComfyUI_Repackaged" \
+                    "split_files/diffusion_models/wan2.2_fun_control_low_noise_14B_bf16.safetensors" \
+                    "data/comfyui/models/diffusion_models/wan2.2_fun_control_low_noise_14B_bf16.safetensors" \
+                || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+                download_hf_if_missing \
+                    "Comfy-Org/Wan_2.1_ComfyUI_repackaged" \
+                    "split_files/diffusion_models/wan2.1_vace_14B_fp16.safetensors" \
+                    "data/comfyui/models/diffusion_models/wan2.1_vace_14B_fp16.safetensors" \
+                || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+                download_hf_if_missing \
+                    "Comfy-Org/Wan_2.2_ComfyUI_Repackaged" \
+                    "split_files/vae/wan2.2_vae.safetensors" \
+                    "data/comfyui/models/vae/wan2.2_vae.safetensors" \
+                || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+                download_hf_if_missing \
+                    "Comfy-Org/Wan_2.1_ComfyUI_repackaged" \
+                    "split_files/vae/wan_2.1_vae.safetensors" \
+                    "data/comfyui/models/vae/wan_2.1_vae.safetensors" \
+                || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            fi
+        fi
+    fi
+
+    if [ "$AUTO_BOOTSTRAP" = "1" ] && [ "$BOOTSTRAP_WARNINGS" -gt 0 ]; then
+        echo -e "${YELLOW}⚠️  Bootstrap completed with ${BOOTSTRAP_WARNINGS} warning(s).${NC}"
+        echo -e "${YELLOW}   ComfyUI will still start, but some models/nodes may be missing.${NC}"
+    fi
+
+    if [ "$BOOTSTRAP_ONLY" = "1" ]; then
+        echo -e "${GREEN}✅ Bootstrap-only complete. Not starting Docker containers.${NC}"
+        exit 0
+    fi
 
     if docker compose version &> /dev/null; then
         DOCKER_COMPOSE="docker compose"

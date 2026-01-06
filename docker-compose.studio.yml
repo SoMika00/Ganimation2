@@ -13,6 +13,10 @@ services:
     environment:
       - NVIDIA_TF32_OVERRIDE=1
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - HF_HOME=/opt/ComfyUI/user/hf_cache
+
+    env_file:
+      - .env
 
     gpus: all
 
