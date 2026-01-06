@@ -16,6 +16,9 @@ Pillow>=10.0.0
 # Video Processing (for previews)
 ffmpeg-python>=0.2.0
 
+# Video download (used by ingestion pipeline)
+yt-dlp>=2024.1.0
+
 # Utilities
 python-dotenv>=1.0.0
 numpy>=1.24.0

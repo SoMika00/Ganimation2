@@ -1,0 +1,72 @@
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3-pip \
+    g++ \
+    build-essential \
+    git \
+    curl \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+
+WORKDIR /opt
+
+RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git
+
+RUN git config --system --add safe.directory '*'
+
+WORKDIR /opt/ComfyUI
+
+RUN pip3 install --upgrade pip setuptools wheel \
+    && pip3 install \
+        torch==2.4.1 \
+        torchvision==0.19.1 \
+        torchaudio==2.4.1 \
+        --index-url https://download.pytorch.org/whl/cu121 \
+    && pip3 install --prefer-binary "numpy<2" \
+    && pip3 install --prefer-binary "opencv-python==4.11.0.86" \
+    && (pip3 install --prefer-binary onnxruntime-gpu || pip3 install --prefer-binary onnxruntime) \
+    && pip3 install --prefer-binary "insightface==0.7.3" \
+    && pip3 install --prefer-binary \
+        GitPython \
+        PyGithub \
+        matrix-nio \
+        transformers \
+        "huggingface-hub>0.20" \
+        accelerate \
+        typer \
+        rich \
+        typing-extensions \
+        toml \
+        uv \
+        chardet \
+    && pip3 install -r requirements.txt \
+    && pip3 install --prefer-binary facexlib ftfy timm imageio-ffmpeg resynthesizer \
+    && pip3 install --prefer-binary \
+        "gguf>=0.17.1" \
+        "diffusers>=0.33.0" \
+        "peft>=0.17.0" \
+        einops \
+        "sentencepiece>=0.2.0" \
+        protobuf \
+        pyloudnorm \
+        scipy \
+    && pip3 uninstall -y onnxruntime || true \
+    && pip3 install --prefer-binary --force-reinstall onnxruntime-gpu \
+    && pip3 install --upgrade --force-reinstall "numpy<2"
+
+EXPOSE 8188
+
+CMD ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188"]

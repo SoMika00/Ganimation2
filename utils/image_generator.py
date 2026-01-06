@@ -45,6 +45,9 @@ class GhibliImageGenerator:
         'seed': -1,
         'controlnet_strength': 0.6,
         'controlnet_type': 'depth',
+        # Img2img strength (0..1). 1.0 ~= ignore init image.
+        # For frame stylization, 0.55-0.75 is typically a good range.
+        'strength': 0.65,
         'pulid_strength': 0.8,
         'batch_size': 4,  # Batch generation
     }
@@ -217,7 +220,7 @@ class GhibliImageGenerator:
                 progress_callback(0.1, "Importing libraries...")
             
             from diffusers import (
-                StableDiffusionXLControlNetPipeline,
+                StableDiffusionXLControlNetImg2ImgPipeline,
                 ControlNetModel,
                 DPMSolverMultistepScheduler,
                 AutoencoderKL
@@ -245,8 +248,11 @@ class GhibliImageGenerator:
             if progress_callback:
                 progress_callback(0.5, "Loading SDXL pipeline...")
             
-            # Load main pipeline
-            pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
+            # Load main pipeline (IMG2IMG).
+            # Using the img2img pipeline is crucial if you want "frame -> stylized frame".
+            # The text2img ControlNet pipeline will otherwise start from random noise and only
+            # use the control image as a hint.
+            pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
                 self.MODELS['sdxl_base'],
                 controlnet=controlnet,
                 vae=vae,
@@ -400,10 +406,18 @@ class GhibliImageGenerator:
                 control_type=cfg['controlnet_type']
             )
             
-            # Resize to SDXL optimal size
-            target_size = (1024, 1024)
-            source_resized = source_image.resize(target_size, Image.Resampling.LANCZOS)
-            control_resized = control_image.resize(target_size, Image.Resampling.LANCZOS)
+            # Resize to an SDXL-friendly size (multiples of 64) while keeping orientation.
+            # Avoids squashing everything into 1024x1024.
+            w0, h0 = source_image.size
+            if h0 >= w0 * 1.2:          # portrait
+                target_w, target_h = 896, 1600
+            elif w0 >= h0 * 1.2:        # landscape
+                target_w, target_h = 1600, 896
+            else:                       # roughly square
+                target_w, target_h = 1024, 1024
+
+            source_resized = source_image.resize((target_w, target_h), Image.Resampling.LANCZOS)
+            control_resized = control_image.resize((target_w, target_h), Image.Resampling.LANCZOS)
             
             if progress_callback:
                 progress_callback(0.2, f"Generating {num_images} image(s)...")
@@ -423,6 +437,8 @@ class GhibliImageGenerator:
             # Set LoRA scale
             self.pipe.set_adapters(["ghibli_style"], adapter_weights=[cfg['lora_weight']])
             
+            strength = float(cfg.get('strength', 0.65))
+
             # Generate - leverage H100 for batch generation
             with torch.inference_mode():
                 if self.is_h100:
@@ -431,7 +447,9 @@ class GhibliImageGenerator:
                         result = self.pipe(
                             prompt=[prompt] * num_images,
                             negative_prompt=[negative_prompt] * num_images,
-                            image=[control_resized] * num_images,
+                            image=[source_resized] * num_images,
+                            control_image=[control_resized] * num_images,
+                            strength=strength,
                             controlnet_conditioning_scale=cfg['controlnet_strength'],
                             num_inference_steps=cfg['steps'],
                             guidance_scale=cfg['cfg_scale'],
@@ -441,7 +459,9 @@ class GhibliImageGenerator:
                     result = self.pipe(
                         prompt=[prompt] * num_images,
                         negative_prompt=[negative_prompt] * num_images,
-                        image=[control_resized] * num_images,
+                        image=[source_resized] * num_images,
+                        control_image=[control_resized] * num_images,
+                        strength=strength,
                         controlnet_conditioning_scale=cfg['controlnet_strength'],
                         num_inference_steps=cfg['steps'],
                         guidance_scale=cfg['cfg_scale'],
@@ -498,24 +518,33 @@ class GhibliImageGenerator:
                     for img in batch
                 ]
                 
-                # Resize
-                target_size = (1024, 1024)
-                control_resized = [
-                    img.resize(target_size, Image.Resampling.LANCZOS)
-                    for img in control_images
-                ]
+                # Resize (batch assumes same orientation/ratio...)
+                w0, h0 = batch[0].size
+                if h0 >= w0 * 1.2:
+                    target_w, target_h = 896, 1600
+                elif w0 >= h0 * 1.2:
+                    target_w, target_h = 1600, 896
+                else:
+                    target_w, target_h = 1024, 1024
+
+                source_resized = [img.resize((target_w, target_h), Image.Resampling.LANCZOS) for img in batch]
+                control_resized = [img.resize((target_w, target_h), Image.Resampling.LANCZOS) for img in control_images]
                 
                 prompt = "Studio Ghibli style, anime illustration, masterpiece, high quality, detailed"
                 negative_prompt = "low quality, bad anatomy, worst quality, blurry"
                 
                 self.pipe.set_adapters(["ghibli_style"], adapter_weights=[cfg['lora_weight']])
                 
+                strength = float(cfg.get('strength', 0.65))
+
                 with torch.inference_mode():
                     with torch.autocast(device_type='cuda', dtype=self.dtype):
                         result = self.pipe(
                             prompt=[prompt] * len(batch),
                             negative_prompt=[negative_prompt] * len(batch),
-                            image=control_resized,
+                            image=source_resized,
+                            control_image=control_resized,
+                            strength=strength,
                             controlnet_conditioning_scale=cfg['controlnet_strength'],
                             num_inference_steps=cfg['steps'],
                             guidance_scale=cfg['cfg_scale'],

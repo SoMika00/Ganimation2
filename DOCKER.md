@@ -43,6 +43,58 @@
 
 ## Quick Start
 
+### Minimal Studio + ComfyUI (Recommended)
+
+This mode runs only:
+- Streamlit Studio (UI)
+- ComfyUI (image generation backend)
+
+```bash
+cd Ganimation2
+./run.sh
+```
+
+URLs:
+- Studio: http://localhost:8501
+- ComfyUI: http://localhost:8188
+
+Persistence (host folders):
+- ComfyUI models: `./data/comfyui/models/`
+- ComfyUI output: `./data/comfyui/output/`
+- ComfyUI input: `./data/comfyui/input/`
+- ComfyUI workflows/settings: `./data/comfyui/user/`
+- ComfyUI plugins: `./data/comfyui/custom_nodes/`
+
+Recommended models layout (host):
+- Checkpoints: `./data/comfyui/models/checkpoints/`
+- LoRAs: `./data/comfyui/models/loras/`
+- ControlNet: `./data/comfyui/models/controlnet/`
+- VAE: `./data/comfyui/models/vae/`
+
+If you added models directly inside the container filesystem, they will be lost on rebuild. Always place them in `./data/comfyui/models/*` on the host.
+
+### Move to another VM (resilient setup)
+
+Copy these folders to the new VM (same paths), then run `./run.sh`:
+- `./data/comfyui/models/` (all ComfyUI models)
+- `./data/comfyui/custom_nodes/` (plugins)
+- `./data/comfyui/user/` (workflows/settings)
+
+### Auto-bootstrap (models + custom nodes)
+
+By default, `./run.sh` attempts to bootstrap a minimal working set:
+- downloads SDXL + Ghibli LoRAs + ControlNet depth/canny + PuLID model (if missing)
+- clones ComfyUI-Manager, comfyui_controlnet_aux, and PuLID_ComfyUI (if missing)
+
+If a download fails (HTTP 404 / network), the stack still starts and you will see a warning.
+
+Flags:
+- `AUTO_BOOTSTRAP=0 ./run.sh`
+- `AUTO_DOWNLOAD_MODELS=0 ./run.sh`
+- `AUTO_INSTALL_CUSTOM_NODES=0 ./run.sh`
+
+If your workflows disappear after rebuild/restart, it's because `user/` was not persisted. This repo now mounts it.
+
 ### Prerequisites
 
 ```bash

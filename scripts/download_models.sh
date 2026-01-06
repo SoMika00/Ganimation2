@@ -21,6 +21,7 @@ fi
 mkdir -p "$MODELS_DIR/checkpoints"
 mkdir -p "$MODELS_DIR/loras"
 mkdir -p "$MODELS_DIR/controlnet"
+mkdir -p "$MODELS_DIR/pulid"
 
 # ============================================================================
 # SDXL Base Model
@@ -48,6 +49,19 @@ else
 fi
 
 # ============================================================================
+# StudioGhibli.Redmond-V2 LoRA (recommended SDXL)
+# ============================================================================
+echo ""
+echo "📥 Downloading StudioGhibli.Redmond-V2 LoRA..."
+if [ ! -f "$MODELS_DIR/loras/StudioGhibli.Redmond-StdGBRRedmAF-StudioGhibli.safetensors" ]; then
+    wget -q --show-progress -O "$MODELS_DIR/loras/StudioGhibli.Redmond-StdGBRRedmAF-StudioGhibli.safetensors" \
+        "https://huggingface.co/artificialguybr/StudioGhibli.Redmond-V2/resolve/main/StudioGhibli.Redmond-StdGBRRedmAF-StudioGhibli.safetensors"
+    echo "✅ StudioGhibli.Redmond-V2 LoRA downloaded"
+else
+    echo "✅ StudioGhibli.Redmond-V2 LoRA already exists"
+fi
+
+# ============================================================================
 # ControlNet Depth (SDXL)
 # ============================================================================
 echo ""
@@ -58,6 +72,32 @@ if [ ! -f "$MODELS_DIR/controlnet/diffusers_xl_depth_full.safetensors" ]; then
     echo "✅ ControlNet Depth downloaded"
 else
     echo "✅ ControlNet Depth already exists"
+fi
+
+# ============================================================================
+# ControlNet Canny (SDXL)
+# ============================================================================
+echo ""
+echo "📥 Downloading ControlNet Canny (SDXL)..."
+if [ ! -f "$MODELS_DIR/controlnet/diffusers_xl_canny_full.safetensors" ]; then
+    wget -q --show-progress -O "$MODELS_DIR/controlnet/diffusers_xl_canny_full.safetensors" \
+        "https://huggingface.co/diffusers/controlnet-canny-sdxl-1.0/resolve/main/diffusion_pytorch_model.fp16.safetensors"
+    echo "✅ ControlNet Canny downloaded"
+else
+    echo "✅ ControlNet Canny already exists"
+fi
+
+# ============================================================================
+# PuLID v1.1 (Identity)
+# ============================================================================
+echo ""
+echo "📥 Downloading PuLID v1.1 model..."
+if [ ! -f "$MODELS_DIR/pulid/pulid_v1.1.safetensors" ]; then
+    wget -q --show-progress -O "$MODELS_DIR/pulid/pulid_v1.1.safetensors" \
+        "https://huggingface.co/guozinan/PuLID/resolve/main/pulid_v1.1.safetensors"
+    echo "✅ PuLID v1.1 downloaded"
+else
+    echo "✅ PuLID v1.1 already exists"
 fi
 
 # ============================================================================

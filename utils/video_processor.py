@@ -340,7 +340,10 @@ class VideoProcessor:
         
         # Clear existing frames
         for f in output_dir.glob("*.png"):
-            f.unlink()
+            try:
+                f.unlink()
+            except PermissionError:
+                pass
         
         try:
             info = self.get_video_info(video_path)

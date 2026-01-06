@@ -7,6 +7,34 @@ version: "3.9"
 
 services:
   # ==========================================================================
+  # ComfyUI - Image generation backend (GPU-enabled)
+  # ==========================================================================
+  comfyui:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.comfyui
+    container_name: ganimation-comfyui-dev
+
+    environment:
+      - NVIDIA_TF32_OVERRIDE=1
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+    gpus: all
+
+    volumes:
+      - ./data/comfyui/models:/opt/ComfyUI/models
+      - ./data/comfyui/output:/opt/ComfyUI/output
+      - ./data/comfyui/input:/opt/ComfyUI/input
+      - ./data/comfyui/user:/opt/ComfyUI/user
+      - ./data/comfyui/custom_nodes:/opt/ComfyUI/custom_nodes
+
+    ports:
+      - "8188:8188"
+
+    networks:
+      - ganimation-dev
+
+  # ==========================================================================
   # API Service - Development Mode
   # ==========================================================================
   api:
@@ -70,6 +98,8 @@ services:
     
     environment:
       - API_URL=http://api:8000
+      - COMFYUI_HOST=comfyui
+      - COMFYUI_PORT=8188
       - STREAMLIT_SERVER_RUN_ON_SAVE=true
       - STREAMLIT_THEME_BASE=dark
     
@@ -90,6 +120,7 @@ services:
     
     depends_on:
       - api
+      - comfyui
 
   # ==========================================================================
   # Redis - Development

@@ -11,6 +11,7 @@ import time
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.video_processor import VideoProcessor
+from utils.video_animator import VideoAnimator, PostProcessor
 
 
 def render():
@@ -18,7 +19,7 @@ def render():
     
     st.markdown("""
     <h1 class="main-title">🎬 Video Studio</h1>
-    <p class="subtitle">Animate Ghibli frames with Wan2.2 and style transfer</p>
+    <p class="subtitle">Run animation conversion pipelines (Wan Animate 2.2)</p>
     """, unsafe_allow_html=True)
     
     # Initialize paths
@@ -30,39 +31,14 @@ def render():
     models_dir = Path(__file__).parent.parent / "models"
     
     video_processor = VideoProcessor(temp_dir, generated_videos)
+    video_animator = VideoAnimator(models_dir, temp_dir)
+    post_processor = PostProcessor(temp_dir, generated_videos)
     
-    # Pipeline Info
-    with st.expander("🔧 Pipeline Overview", expanded=False):
-        st.markdown("""
-        ### Wan2.2 Animate Control Pipeline
-        
-        This pipeline combines:
-        
-        1. **Input Image** - Generated Ghibli-style frame (from Image Studio)
-        2. **Source Video** - Original video for motion reference
-        3. **Wan2.2** - AnimateDiff-style video generation
-        4. **Optional:** Relighting LoRA for enhanced lighting effects
-        
-        ### Output Processing
-        
-        - **RIFE** - Frame interpolation for smoother motion
-        - **Upscale** - Resolution enhancement if needed
-        - **Audio Merge** - Reattach original audio track
-        - **Final Encode** - H.264 optimized output
-        
-        ### Model Files Needed
-        
-        ```
-        models/
-        ├── wan2.2/
-        │   ├── wan_animate_control.safetensors
-        │   └── WanAnimate_relight_lora_fp16.safetensors
-        ├── rife/
-        │   └── rife_v4.6.pkl
-        └── realesrgan/
-            └── RealESRGAN_x4plus.pth
-        ```
-        """)
+    pipeline_name = st.selectbox(
+        "Pipeline",
+        options=["Wan Animate 2.2 (Animate Control)"],
+        index=0,
+    )
     
     st.markdown("---")
     
@@ -79,7 +55,7 @@ def render():
         # Generated Image Selection
         with col_img:
             st.markdown("#### 🎨 Generated Image")
-            st.caption("Ghibli-style frame to animate")
+            st.caption("Input subject image (generated via IA)")
             
             gen_images = sorted(
                 generated_images.glob("*.png"),
@@ -115,7 +91,7 @@ def render():
         # Source Video Selection (for motion)
         with col_vid:
             st.markdown("#### 📹 Source Video")
-            st.caption("Motion reference video")
+            st.caption("Base video (motion reference)")
             
             source_videos = sorted(
                 source_media.glob("*.mp4"),
@@ -155,138 +131,57 @@ def render():
                 if info:
                     st.caption(f"⏱️ {info.get('duration', 0):.1f}s | 🎬 {info.get('fps', 30):.0f}fps")
     
-    # ===== Generation Settings =====
+    # ===== Pipeline Settings =====
     with col_settings:
-        st.markdown("### ⚙️ Animation Settings")
+        st.markdown("### ⚙️ Pipeline Settings")
         
         with st.container():
-            st.markdown('<div class="studio-card">', unsafe_allow_html=True)
-            
-            # Wan2.2 Settings
-            st.markdown("**🎬 Wan2.2 Animate**")
-            
-            motion_strength = st.slider(
-                "Motion Strength",
-                min_value=0.1,
-                max_value=1.0,
-                value=0.7,
-                step=0.1,
-                help="How much motion to transfer from source"
-            )
-            
-            num_frames = st.slider(
-                "Output Frames",
-                min_value=16,
-                max_value=128,
-                value=48,
-                step=8,
-                help="Number of frames to generate"
-            )
-            
-            guidance_scale = st.slider(
-                "Guidance Scale",
-                min_value=1.0,
-                max_value=15.0,
-                value=7.5,
-                step=0.5
-            )
-            
-            st.markdown("---")
-            
-            # Relighting LoRA
-            st.markdown("**💡 Relighting LoRA**")
-            
+            st.markdown("**💡 Optional: Relighting LoRA**")
+
+            wan_dir = models_dir / "wan2.2"
+            relight_primary = wan_dir / "WanAnimate_relight_lora_fp16.safetensors"
+            relight_fallback = wan_dir / "WanAnimate_relight_lora_fp16_resized_from_128_to_dynamic_22.safetensors"
+
+            available_relight = []
+            if relight_primary.exists():
+                available_relight.append(str(relight_primary))
+            if relight_fallback.exists():
+                available_relight.append(str(relight_fallback))
+
             use_relighting = st.checkbox(
-                "Enable Relighting",
+                "Enable Relighting LoRA",
                 value=False,
-                help="Use WanAnimate_relight_lora for enhanced lighting"
+                help="Bonus: improves lighting consistency. If the main LoRA bugs, use the resized fallback.",
             )
-            
+
             if use_relighting:
-                relight_strength = st.slider(
-                    "Relight Strength",
-                    min_value=0.0,
-                    max_value=1.0,
-                    value=0.5,
-                    step=0.1
-                )
+                if not available_relight:
+                    st.warning("Relighting LoRA not found in models/wan2.2")
+                    relight_path = None
+                else:
+                    relight_path = st.selectbox(
+                        "Relight LoRA file",
+                        options=available_relight,
+                        index=0,
+                    )
             else:
-                relight_strength = 0.0
-            
-            st.markdown("---")
-            
-            # Post-processing
-            st.markdown("**🔧 Post-Processing**")
-            
-            use_rife = st.checkbox(
-                "RIFE Interpolation",
-                value=True,
-                help="Interpolate frames for smoother motion"
-            )
-            
-            if use_rife:
-                rife_multiplier = st.selectbox(
-                    "Frame Multiplier",
-                    options=[2, 4],
-                    index=0,
-                    help="2x or 4x frame interpolation"
-                )
-            else:
-                rife_multiplier = 1
-            
-            use_upscale = st.checkbox(
-                "Upscale Output",
-                value=False,
-                help="Use Real-ESRGAN for upscaling"
-            )
-            
-            merge_audio = st.checkbox(
-                "Merge Original Audio",
-                value=True,
-                help="Add audio from source video"
-            )
-            
-            st.markdown("---")
-            
-            # Output settings
-            st.markdown("**📤 Output**")
-            
-            output_fps = st.selectbox(
-                "Output FPS",
-                options=[24, 30, 60],
-                index=1
-            )
-            
-            output_quality = st.select_slider(
-                "Quality",
-                options=["Fast", "Balanced", "High Quality"],
-                value="Balanced"
-            )
-            
-            st.markdown('</div>', unsafe_allow_html=True)
+                relight_path = None
     
-    # ===== Generation =====
+    # ===== Run =====
     st.markdown("---")
     
     can_generate = selected_image is not None and selected_video is not None
     
-    col_gen, col_preview = st.columns([1, 1])
-    
-    with col_gen:
-        generate_btn = st.button(
-            "🚀 Generate Animation",
-            use_container_width=True,
-            disabled=not can_generate,
-            type="primary",
-            key="generate_video_btn"
-        )
-        
-        if not can_generate:
-            st.caption("⚠️ Select both an image and video first")
-    
-    with col_preview:
-        st.markdown("**Pipeline Preview:**")
-        st.caption(f"📸 {Path(selected_image).stem if selected_image else 'None'} → 🎬 Wan2.2 → {'📈 RIFE → ' if use_rife else ''}{'🔍 Upscale → ' if use_upscale else ''}{'🔊 Audio → ' if merge_audio else ''}📤 Output")
+    generate_btn = st.button(
+        "🚀 Run Pipeline",
+        use_container_width=True,
+        disabled=not can_generate,
+        type="primary",
+        key="generate_video_btn"
+    )
+
+    if not can_generate:
+        st.caption("⚠️ Select both an image and video first")
     
     # Generation Process
     if generate_btn and can_generate:
@@ -294,112 +189,93 @@ def render():
         
         progress_bar = st.progress(0)
         status_text = st.empty()
-        
-        # Prepare settings dict
-        settings = {
-            'motion_strength': motion_strength,
-            'num_frames': num_frames,
-            'guidance_scale': guidance_scale,
-            'use_relighting': use_relighting,
-            'relight_strength': relight_strength,
-            'use_rife': use_rife,
-            'rife_multiplier': rife_multiplier,
-            'use_upscale': use_upscale,
-            'merge_audio': merge_audio,
-            'output_fps': output_fps,
-            'output_quality': output_quality,
-        }
-        
+
         try:
-            # Placeholder for actual generation
-            # This would integrate with Wan2.2 when models are available
-            
-            status_text.markdown("**🔄 Initializing pipeline...**")
-            progress_bar.progress(0.1)
-            time.sleep(0.5)
-            
-            status_text.markdown("**📥 Loading models...**")
-            progress_bar.progress(0.2)
-            
-            # Check if models exist
-            wan_model_path = models_dir / "wan2.2" / "wan_animate_control.safetensors"
-            
-            if not wan_model_path.exists():
+            status_text.markdown(f"**🔄 Initializing: {pipeline_name}...**")
+            progress_bar.progress(0.05)
+
+            models_ok = video_animator.check_models()
+            if not models_ok.get('wan_animate'):
                 progress_bar.empty()
                 status_text.empty()
-                
-                st.warning("""
-                ⚠️ **Wan2.2 Models Not Found**
-                
-                This feature requires the Wan2.2 Animate Control models.
-                
-                **Setup Instructions:**
-                
-                1. Download the model files:
-                   - `wan_animate_control.safetensors`
-                   - `WanAnimate_relight_lora_fp16.safetensors` (optional)
-                
-                2. Place them in: `models/wan2.2/`
-                
-                3. Install additional dependencies:
-                   ```bash
-                   pip install einops rotary_embedding_torch
-                   ```
-                """)
-                
-                # Show what would be generated
-                st.markdown("---")
-                st.markdown("### 📋 Generation Configuration (Preview)")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.json({
-                        "input_image": Path(selected_image).name,
-                        "source_video": Path(selected_video).name,
-                        "output_frames": num_frames,
-                        "motion_strength": motion_strength,
-                    })
-                with col2:
-                    st.json({
-                        "post_processing": {
-                            "rife": use_rife,
-                            "rife_multiplier": rife_multiplier if use_rife else None,
-                            "upscale": use_upscale,
-                            "merge_audio": merge_audio,
-                        },
-                        "output": {
-                            "fps": output_fps,
-                            "quality": output_quality
-                        }
-                    })
+                st.error("Missing model: `models/wan2.2/wan_animate_control.safetensors`")
             else:
-                # Actual generation would happen here
-                status_text.markdown("**🎬 Generating frames...**")
-                
-                # Simulate progress
-                for i in range(30, 80, 10):
-                    progress_bar.progress(i / 100)
-                    time.sleep(0.3)
-                
-                if use_rife:
-                    status_text.markdown("**📈 Interpolating frames with RIFE...**")
+                status_text.markdown("**📥 Loading inputs...**")
+                progress_bar.progress(0.10)
+
+                input_img = Image.open(selected_image).convert('RGB')
+                reference_video_path = Path(selected_video)
+
+                status_text.markdown("**🎬 Running Wan Animate 2.2...**")
+                progress_bar.progress(0.20)
+
+                def _progress(p, msg):
+                    progress_bar.progress(min(0.20 + p * 0.60, 0.80))
+                    status_text.markdown(f"**{msg}**")
+
+                success, msg, frames = video_animator.animate(
+                    source_image=input_img,
+                    reference_video_path=reference_video_path,
+                    settings={
+                        'use_relighting': bool(relight_path),
+                        'relight_lora_path': relight_path,
+                    },
+                    progress_callback=_progress,
+                )
+
+                if not success or not frames:
+                    progress_bar.empty()
+                    status_text.empty()
+                    st.error(f"❌ Wan Animate failed: {msg}")
+                else:
+                    status_text.markdown("**📤 Encoding video...**")
                     progress_bar.progress(0.85)
-                    time.sleep(0.5)
-                
-                if merge_audio:
-                    status_text.markdown("**🔊 Merging audio...**")
-                    progress_bar.progress(0.95)
-                    time.sleep(0.3)
-                
-                progress_bar.progress(1.0)
-                status_text.markdown("**✅ Complete!**")
-                
-                # Output path
-                base_name = Path(selected_image).stem
-                output_name = f"{base_name}_animated.mp4"
-                output_path = generated_videos / output_name
-                
-                st.success(f"🎉 Video generated: `{output_name}`")
+
+                    run_id = time.strftime("%Y%m%d_%H%M%S")
+                    base_name = f"{Path(selected_video).stem}__{Path(selected_image).stem}"
+                    output_name = f"{base_name}__wan22__{run_id}.mp4"
+                    output_path = generated_videos / output_name
+
+                    tmp_video = temp_dir / f"tmp__{output_name}"
+                    ok, enc_msg = post_processor.frames_to_video(
+                        frames=frames,
+                        output_path=tmp_video,
+                        fps=30,
+                        crf=18,
+                        preset="medium",
+                    )
+                    if not ok:
+                        progress_bar.empty()
+                        status_text.empty()
+                        st.error(f"❌ Encode failed: {enc_msg}")
+                    else:
+                        status_text.markdown("**🔊 Merging audio...**")
+                        progress_bar.progress(0.95)
+
+                        ok, merge_msg = post_processor.merge_audio(
+                            video_path=tmp_video,
+                            audio_source=reference_video_path,
+                            output_path=output_path,
+                        )
+                        if ok:
+                            try:
+                                tmp_video.unlink()
+                            except Exception:
+                                pass
+                            progress_bar.progress(1.0)
+                            status_text.markdown("**✅ Complete!**")
+                            st.success(f"🎉 Video generated: `{output_name}`")
+                            st.video(str(output_path))
+                        else:
+                            try:
+                                tmp_video.replace(output_path)
+                            except Exception:
+                                pass
+                            progress_bar.progress(1.0)
+                            status_text.markdown("**✅ Complete (no audio)!**")
+                            st.warning(f"Audio merge failed: {merge_msg}")
+                            st.success(f"🎉 Video generated: `{output_name}`")
+                            st.video(str(output_path))
                 
         except Exception as e:
             progress_bar.empty()
@@ -433,50 +309,6 @@ def render():
     else:
         st.info("No generated videos yet. Create your first animation above!")
     
-    # ===== Advanced Pipeline Configuration =====
     st.markdown("---")
-    
-    with st.expander("🔬 Advanced Configuration"):
-        st.markdown("""
-        ### Custom Pipeline Configuration
-        
-        For advanced users who want to modify the pipeline parameters directly.
-        """)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("**Wan2.2 Parameters**")
-            
-            wan_steps = st.number_input("Inference Steps", 10, 100, 30)
-            wan_cfg = st.number_input("CFG Scale", 1.0, 20.0, 7.5, 0.5)
-            wan_seed = st.number_input("Seed (-1 for random)", -1, 2147483647, -1)
-        
-        with col2:
-            st.markdown("**Output Encoding**")
-            
-            encoder_preset = st.selectbox(
-                "Encoder Preset",
-                ["ultrafast", "superfast", "fast", "medium", "slow", "veryslow"],
-                index=3
-            )
-            crf_value = st.slider("CRF (quality)", 15, 28, 18)
-            pixel_format = st.selectbox(
-                "Pixel Format",
-                ["yuv420p", "yuv444p"],
-                index=0
-            )
-        
-        st.markdown("---")
-        
-        st.markdown("**FFmpeg Command Preview:**")
-        st.code(f"""
-ffmpeg -framerate {output_fps} -i frames/%04d.png \\
-  {f'-i audio.aac' if merge_audio else ''} \\
-  -c:v libx264 -crf {crf_value} -preset {encoder_preset} \\
-  -pix_fmt {pixel_format} \\
-  {'-c:a aac -b:a 192k -shortest' if merge_audio else ''} \\
-  -movflags +faststart \\
-  output.mp4
-        """)
+    st.caption("New videos appear automatically in **Gallery → Generated Videos**")
 
