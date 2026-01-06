@@ -22,6 +22,10 @@ MODE="docker"
 DETACHED=""
 BUILD="--build"
 BOOTSTRAP_ONLY="0"
+EXPORT_WORKFLOWS_ONLY="0"
+IMPORT_WORKFLOWS="1"
+AUTO_EXPORT_WORKFLOWS="1"
+FORCE_IMPORT_WORKFLOWS="0"
 
 for arg in "$@"; do
     case "$arg" in
@@ -40,6 +44,18 @@ for arg in "$@"; do
         --bootstrap-only)
             BOOTSTRAP_ONLY="1"
             ;;
+        --export-workflows)
+            EXPORT_WORKFLOWS_ONLY="1"
+            ;;
+        --no-import-workflows)
+            IMPORT_WORKFLOWS="0"
+            ;;
+        --force-import-workflows)
+            FORCE_IMPORT_WORKFLOWS="1"
+            ;;
+        --no-auto-export-workflows)
+            AUTO_EXPORT_WORKFLOWS="0"
+            ;;
         --help|-h)
             MODE="--help"
             ;;
@@ -55,6 +71,11 @@ if [ "$MODE" = "--help" ] || [ "$MODE" = "-h" ]; then
     echo "  -d, --detached: run in detached mode"
     echo "  --build: rebuild Docker images (default in docker mode; uses cache)"
     echo "  --no-build: start containers without rebuilding"
+    echo "  --bootstrap-only: run model/node bootstrap then exit (no containers)"
+    echo "  --export-workflows: export ComfyUI UI workflows into ./workflows/comfyui then exit"
+    echo "  --no-import-workflows: skip importing ./workflows/comfyui into ComfyUI user volume"
+    echo "  --force-import-workflows: import repo workflows even if ComfyUI already has workflows"
+    echo "  --no-auto-export-workflows: disable auto-export of ComfyUI workflows on run/exit"
     exit 0
 fi
 
@@ -77,6 +98,174 @@ if [ "$MODE" = "docker" ]; then
         gallery/{source_media,generated_images,generated_videos} \
         temp \
         models
+
+    # Versioned ComfyUI workflows (portable across VMs)
+    mkdir -p workflows/comfyui
+
+    # ComfyUI UI user path
+    mkdir -p data/comfyui/user/default/workflows
+
+    # Auto-export setting (can be overridden by env)
+    AUTO_EXPORT_WORKFLOWS="${AUTO_EXPORT_WORKFLOWS:-1}"
+
+    _hash_cmd() {
+        if command -v sha256sum >/dev/null 2>&1; then
+            echo "sha256sum"
+            return 0
+        fi
+        if command -v shasum >/dev/null 2>&1; then
+            echo "shasum -a 256"
+            return 0
+        fi
+        echo ""
+        return 1
+    }
+
+    compute_workflows_hash() {
+        local src_dir="data/comfyui/user/default/workflows"
+        local settings_file="data/comfyui/user/default/comfy.settings.json"
+        local hash_cmd
+
+        hash_cmd="$(_hash_cmd)" || true
+        if [ -z "$hash_cmd" ]; then
+            echo ""
+            return 0
+        fi
+
+        if [ ! -d "$src_dir" ]; then
+            echo ""
+            return 0
+        fi
+
+        (
+            set +e
+            cd "$src_dir" 2>/dev/null || exit 0
+            find . -maxdepth 1 -type f -name "*.json" -print0 2>/dev/null \
+                | sort -z \
+                | xargs -0 $hash_cmd 2>/dev/null
+        ) | $hash_cmd 2>/dev/null | awk '{print $1}'
+
+        if [ -f "$settings_file" ]; then
+            $hash_cmd "$settings_file" 2>/dev/null | awk '{print $1}'
+        fi
+    }
+
+    maybe_auto_export_workflows() {
+        local reason="$1"
+        local state_file="data/comfyui/user/.workflows_export_hash"
+
+        if [ "$AUTO_EXPORT_WORKFLOWS" != "1" ]; then
+            return 0
+        fi
+
+        if [ ! -d "data/comfyui/user/default/workflows" ]; then
+            return 0
+        fi
+
+        local current_hash
+        current_hash="$(compute_workflows_hash | tr -d '\n' | head -c 128)"
+
+        if [ -z "$current_hash" ]; then
+            return 0
+        fi
+
+        local previous_hash=""
+        if [ -f "$state_file" ]; then
+            previous_hash="$(cat "$state_file" 2>/dev/null || true)"
+        fi
+
+        if [ "$current_hash" = "$previous_hash" ]; then
+            return 0
+        fi
+
+        echo -e "${CYAN}🧩 Detected workflow changes (${reason}). Exporting to workflows/comfyui...${NC}"
+        export_workflows || true
+        echo "$current_hash" > "$state_file" 2>/dev/null || true
+        return 0
+    }
+
+    _on_exit() {
+        set +e
+        maybe_auto_export_workflows "shutdown" || true
+    }
+
+    export_workflows() {
+        local src_dir="data/comfyui/user/default/workflows"
+        local dst_dir="workflows/comfyui"
+
+        mkdir -p "$dst_dir"
+
+        if [ ! -d "$src_dir" ]; then
+            echo -e "${YELLOW}⚠️  No ComfyUI workflows directory found at $src_dir${NC}"
+            return 1
+        fi
+
+        local copied=0
+        while IFS= read -r -d '' f; do
+            cp -f "$f" "$dst_dir/" && copied=$((copied+1))
+        done < <(find "$src_dir" -maxdepth 1 -type f -name "*.json" -print0 2>/dev/null || true)
+
+        if [ -f "data/comfyui/user/default/comfy.settings.json" ]; then
+            cp -f "data/comfyui/user/default/comfy.settings.json" "workflows/comfyui/comfy.settings.json" || true
+        fi
+
+        echo -e "${GREEN}✅ Exported ${copied} workflow(s) to ${dst_dir}${NC}"
+        echo -e "${GREEN}   Next: git add workflows/comfyui && git commit && git push${NC}"
+        return 0
+    }
+
+    import_workflows() {
+        local src_dir="workflows/comfyui"
+        local dst_dir="data/comfyui/user/default/workflows"
+
+        if [ ! -d "$src_dir" ]; then
+            return 0
+        fi
+
+        mkdir -p "$dst_dir"
+
+        # Safety: never overwrite local ComfyUI UI workflows.
+        # Only import repo workflows on a fresh VM/new project (destination empty), unless forced.
+        if [ "$FORCE_IMPORT_WORKFLOWS" != "1" ]; then
+            if find "$dst_dir" -maxdepth 1 -type f -name "*.json" -print -quit 2>/dev/null | grep -q .; then
+                echo -e "${CYAN}🧩 Existing ComfyUI workflows detected in data/. Skipping import from workflows/comfyui.${NC}"
+                echo -e "${CYAN}   Use --force-import-workflows if you really want to overwrite/refresh.${NC}"
+                return 0
+            fi
+        fi
+
+        local copied=0
+        while IFS= read -r -d '' f; do
+            local base
+            base="$(basename "$f")"
+            cp -f "$f" "$dst_dir/$base" && copied=$((copied+1))
+        done < <(find "$src_dir" -maxdepth 1 -type f -name "*.json" -print0 2>/dev/null || true)
+
+        if [ -f "workflows/comfyui/comfy.settings.json" ]; then
+            cp -f "workflows/comfyui/comfy.settings.json" "data/comfyui/user/default/comfy.settings.json" || true
+        fi
+
+        if [ "$copied" -gt 0 ]; then
+            echo -e "${GREEN}✅ Imported ${copied} workflow(s) into ComfyUI user volume${NC}"
+        fi
+
+        return 0
+    }
+
+    if [ "$EXPORT_WORKFLOWS_ONLY" = "1" ]; then
+        export_workflows
+        exit 0
+    fi
+
+    # Auto-export any workflows created/updated in the ComfyUI UI since the last run.
+    # Do this BEFORE importing from the repo so we don't overwrite local UI changes.
+    maybe_auto_export_workflows "startup" || true
+
+    trap _on_exit EXIT INT TERM
+
+    if [ "$IMPORT_WORKFLOWS" = "1" ]; then
+        import_workflows || true
+    fi
 
     # Standard ComfyUI models layout (recommended)
     mkdir -p \
