@@ -35,7 +35,7 @@ env/
 *.sublime-*
 
 # Data directories
-data/
+data/**
 gallery/source_media/*
 gallery/generated_images/*
 gallery/generated_videos/*
@@ -56,6 +56,9 @@ logs/
 
 # Docker
 docker-compose.override.yml
+
+# Legacy exported workflows folder (no longer used)
+workflows/
 
 # Secrets
 .env
@@ -80,6 +83,24 @@ Desktop.ini
 *.pt
 *.pth
 *.bin
+
+# Track only ComfyUI workflow JSONs + UI settings (portable across VMs)
+!data/comfyui/
+!data/comfyui/user/
+!data/comfyui/user/default/
+!data/comfyui/user/default/workflows/
+!data/comfyui/user/default/workflows/*.json
+!data/comfyui/user/default/comfy.settings.json
+
+# Ignore ComfyUI caches/logs/large folders
+data/comfyui/models/
+data/comfyui/output/
+data/comfyui/input/
+data/comfyui/custom_nodes/
+data/comfyui/user/__manager/
+data/comfyui/user/**/*.log
+data/comfyui/user/.tmp_*
+data/comfyui/user/.workflows_export_hash
 
 # Jupyter
 .ipynb_checkpoints/

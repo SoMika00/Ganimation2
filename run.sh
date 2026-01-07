@@ -22,10 +22,6 @@ MODE="docker"
 DETACHED=""
 BUILD="--build"
 BOOTSTRAP_ONLY="0"
-EXPORT_WORKFLOWS_ONLY="0"
-IMPORT_WORKFLOWS="1"
-AUTO_EXPORT_WORKFLOWS="1"
-FORCE_IMPORT_WORKFLOWS="0"
 
 for arg in "$@"; do
     case "$arg" in
@@ -44,18 +40,6 @@ for arg in "$@"; do
         --bootstrap-only)
             BOOTSTRAP_ONLY="1"
             ;;
-        --export-workflows)
-            EXPORT_WORKFLOWS_ONLY="1"
-            ;;
-        --no-import-workflows)
-            IMPORT_WORKFLOWS="0"
-            ;;
-        --force-import-workflows)
-            FORCE_IMPORT_WORKFLOWS="1"
-            ;;
-        --no-auto-export-workflows)
-            AUTO_EXPORT_WORKFLOWS="0"
-            ;;
         --help|-h)
             MODE="--help"
             ;;
@@ -72,10 +56,6 @@ if [ "$MODE" = "--help" ] || [ "$MODE" = "-h" ]; then
     echo "  --build: rebuild Docker images (default in docker mode; uses cache)"
     echo "  --no-build: start containers without rebuilding"
     echo "  --bootstrap-only: run model/node bootstrap then exit (no containers)"
-    echo "  --export-workflows: export ComfyUI UI workflows into ./workflows/comfyui then exit"
-    echo "  --no-import-workflows: skip importing ./workflows/comfyui into ComfyUI user volume"
-    echo "  --force-import-workflows: import repo workflows even if ComfyUI already has workflows"
-    echo "  --no-auto-export-workflows: disable auto-export of ComfyUI workflows on run/exit"
     exit 0
 fi
 
@@ -99,173 +79,8 @@ if [ "$MODE" = "docker" ]; then
         temp \
         models
 
-    # Versioned ComfyUI workflows (portable across VMs)
-    mkdir -p workflows/comfyui
-
-    # ComfyUI UI user path
+    # Ensure ComfyUI UI workflow directory exists (workflows are tracked directly in git)
     mkdir -p data/comfyui/user/default/workflows
-
-    # Auto-export setting (can be overridden by env)
-    AUTO_EXPORT_WORKFLOWS="${AUTO_EXPORT_WORKFLOWS:-1}"
-
-    _hash_cmd() {
-        if command -v sha256sum >/dev/null 2>&1; then
-            echo "sha256sum"
-            return 0
-        fi
-        if command -v shasum >/dev/null 2>&1; then
-            echo "shasum -a 256"
-            return 0
-        fi
-        echo ""
-        return 1
-    }
-
-    compute_workflows_hash() {
-        local src_dir="data/comfyui/user/default/workflows"
-        local settings_file="data/comfyui/user/default/comfy.settings.json"
-        local hash_cmd
-
-        hash_cmd="$(_hash_cmd)" || true
-        if [ -z "$hash_cmd" ]; then
-            echo ""
-            return 0
-        fi
-
-        if [ ! -d "$src_dir" ]; then
-            echo ""
-            return 0
-        fi
-
-        (
-            set +e
-            cd "$src_dir" 2>/dev/null || exit 0
-            find . -maxdepth 1 -type f -name "*.json" -print0 2>/dev/null \
-                | sort -z \
-                | xargs -0 $hash_cmd 2>/dev/null
-        ) | $hash_cmd 2>/dev/null | awk '{print $1}'
-
-        if [ -f "$settings_file" ]; then
-            $hash_cmd "$settings_file" 2>/dev/null | awk '{print $1}'
-        fi
-    }
-
-    maybe_auto_export_workflows() {
-        local reason="$1"
-        local state_file="data/comfyui/user/.workflows_export_hash"
-
-        if [ "$AUTO_EXPORT_WORKFLOWS" != "1" ]; then
-            return 0
-        fi
-
-        if [ ! -d "data/comfyui/user/default/workflows" ]; then
-            return 0
-        fi
-
-        local current_hash
-        current_hash="$(compute_workflows_hash | tr -d '\n' | head -c 128)"
-
-        if [ -z "$current_hash" ]; then
-            return 0
-        fi
-
-        local previous_hash=""
-        if [ -f "$state_file" ]; then
-            previous_hash="$(cat "$state_file" 2>/dev/null || true)"
-        fi
-
-        if [ "$current_hash" = "$previous_hash" ]; then
-            return 0
-        fi
-
-        echo -e "${CYAN}🧩 Detected workflow changes (${reason}). Exporting to workflows/comfyui...${NC}"
-        export_workflows || true
-        echo "$current_hash" > "$state_file" 2>/dev/null || true
-        return 0
-    }
-
-    _on_exit() {
-        set +e
-        maybe_auto_export_workflows "shutdown" || true
-    }
-
-    export_workflows() {
-        local src_dir="data/comfyui/user/default/workflows"
-        local dst_dir="workflows/comfyui"
-
-        mkdir -p "$dst_dir"
-
-        if [ ! -d "$src_dir" ]; then
-            echo -e "${YELLOW}⚠️  No ComfyUI workflows directory found at $src_dir${NC}"
-            return 1
-        fi
-
-        local copied=0
-        while IFS= read -r -d '' f; do
-            cp -f "$f" "$dst_dir/" && copied=$((copied+1))
-        done < <(find "$src_dir" -maxdepth 1 -type f -name "*.json" -print0 2>/dev/null || true)
-
-        if [ -f "data/comfyui/user/default/comfy.settings.json" ]; then
-            cp -f "data/comfyui/user/default/comfy.settings.json" "workflows/comfyui/comfy.settings.json" || true
-        fi
-
-        echo -e "${GREEN}✅ Exported ${copied} workflow(s) to ${dst_dir}${NC}"
-        echo -e "${GREEN}   Next: git add workflows/comfyui && git commit && git push${NC}"
-        return 0
-    }
-
-    import_workflows() {
-        local src_dir="workflows/comfyui"
-        local dst_dir="data/comfyui/user/default/workflows"
-
-        if [ ! -d "$src_dir" ]; then
-            return 0
-        fi
-
-        mkdir -p "$dst_dir"
-
-        # Safety: never overwrite local ComfyUI UI workflows.
-        # Only import repo workflows on a fresh VM/new project (destination empty), unless forced.
-        if [ "$FORCE_IMPORT_WORKFLOWS" != "1" ]; then
-            if find "$dst_dir" -maxdepth 1 -type f -name "*.json" -print -quit 2>/dev/null | grep -q .; then
-                echo -e "${CYAN}🧩 Existing ComfyUI workflows detected in data/. Skipping import from workflows/comfyui.${NC}"
-                echo -e "${CYAN}   Use --force-import-workflows if you really want to overwrite/refresh.${NC}"
-                return 0
-            fi
-        fi
-
-        local copied=0
-        while IFS= read -r -d '' f; do
-            local base
-            base="$(basename "$f")"
-            cp -f "$f" "$dst_dir/$base" && copied=$((copied+1))
-        done < <(find "$src_dir" -maxdepth 1 -type f -name "*.json" -print0 2>/dev/null || true)
-
-        if [ -f "workflows/comfyui/comfy.settings.json" ]; then
-            cp -f "workflows/comfyui/comfy.settings.json" "data/comfyui/user/default/comfy.settings.json" || true
-        fi
-
-        if [ "$copied" -gt 0 ]; then
-            echo -e "${GREEN}✅ Imported ${copied} workflow(s) into ComfyUI user volume${NC}"
-        fi
-
-        return 0
-    }
-
-    if [ "$EXPORT_WORKFLOWS_ONLY" = "1" ]; then
-        export_workflows
-        exit 0
-    fi
-
-    # Auto-export any workflows created/updated in the ComfyUI UI since the last run.
-    # Do this BEFORE importing from the repo so we don't overwrite local UI changes.
-    maybe_auto_export_workflows "startup" || true
-
-    trap _on_exit EXIT INT TERM
-
-    if [ "$IMPORT_WORKFLOWS" = "1" ]; then
-        import_workflows || true
-    fi
 
     # Standard ComfyUI models layout (recommended)
     mkdir -p \
@@ -279,6 +94,7 @@ if [ "$MODE" = "docker" ]; then
     AUTO_BOOTSTRAP="${AUTO_BOOTSTRAP:-1}"
     AUTO_DOWNLOAD_MODELS="${AUTO_DOWNLOAD_MODELS:-1}"
     AUTO_INSTALL_CUSTOM_NODES="${AUTO_INSTALL_CUSTOM_NODES:-1}"
+    AUTO_INSTALL_VAP="${AUTO_INSTALL_VAP:-0}"
 
     BOOTSTRAP_WARNINGS=0
 
@@ -400,6 +216,19 @@ if [ "$MODE" = "docker" ]; then
             clone_if_missing "https://github.com/stuttlepress/ComfyUI-Wan-VACE-Prep.git" "data/comfyui/custom_nodes/ComfyUI-Wan-VACE-Prep" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
         fi
 
+        if [ "$AUTO_INSTALL_VAP" = "1" ]; then
+            if [ -d "data/comfyui/custom_nodes/ComfyUI-WanVideoWrapper/.git" ]; then
+                ensure_git_branch "data/comfyui/custom_nodes/ComfyUI-WanVideoWrapper" "vap" || true
+            else
+                if command -v git >/dev/null 2>&1; then
+                    rm -rf "data/comfyui/custom_nodes/ComfyUI-WanVideoWrapper" 2>/dev/null || true
+                    git clone --depth 1 -b vap "https://github.com/kijai/ComfyUI-WanVideoWrapper.git" "data/comfyui/custom_nodes/ComfyUI-WanVideoWrapper" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+                else
+                    BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+                fi
+            fi
+        fi
+
         if [ "$AUTO_DOWNLOAD_MODELS" = "1" ]; then
             download_if_missing \
                 "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors" \
@@ -454,6 +283,31 @@ if [ "$MODE" = "docker" ]; then
                 "data/comfyui/models/diffusion_models/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors" \
             || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
 
+            download_if_missing \
+                "https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged/resolve/main/split_files/vae/ae.safetensors" \
+                "data/comfyui/models/vae/ae.safetensors" \
+            || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_if_missing \
+                "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors" \
+                "data/comfyui/models/text_encoders/clip_l.safetensors" \
+            || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_if_missing \
+                "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn_scaled.safetensors" \
+                "data/comfyui/models/text_encoders/t5xxl_fp8_e4m3fn_scaled.safetensors" \
+            || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_if_missing \
+                "https://huggingface.co/Comfy-Org/flux1-kontext-dev_ComfyUI/resolve/main/split_files/diffusion_models/flux1-dev-kontext_fp8_scaled.safetensors" \
+                "data/comfyui/models/diffusion_models/flux1-dev-kontext_fp8_scaled.safetensors" \
+            || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+            download_if_missing \
+                "https://huggingface.co/Kontext-Style/Ghibli_lora/resolve/main/Ghibli_lora_weights.safetensors" \
+                "data/comfyui/models/loras/Ghibli_lora_weights.safetensors" \
+            || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
             download_hf_if_missing \
                 "Kijai/WanVideo_comfy" \
                 "LoRAs/Wan22_relight/WanAnimate_relight_lora_fp16.safetensors" \
@@ -491,6 +345,33 @@ if [ "$MODE" = "docker" ]; then
                     "split_files/diffusion_models/wan2.1_vace_14B_fp16.safetensors" \
                     "data/comfyui/models/diffusion_models/wan2.1_vace_14B_fp16.safetensors" \
                 || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+                download_if_missing \
+                    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors" \
+                    "data/comfyui/models/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors" \
+                || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+                download_if_missing \
+                    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp16.safetensors" \
+                    "data/comfyui/models/text_encoders/umt5_xxl_fp16.safetensors" \
+                || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+                download_if_missing \
+                    "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan21_CausVid_bidirect2_T2V_1_3B_lora_rank32.safetensors" \
+                    "data/comfyui/models/loras/Wan21_CausVid_bidirect2_T2V_1_3B_lora_rank32.safetensors" \
+                || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+                download_if_missing \
+                    "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan21_CausVid_14B_T2V_lora_rank32.safetensors" \
+                    "data/comfyui/models/loras/Wan21_CausVid_14B_T2V_lora_rank32.safetensors" \
+                || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+                if [ "$AUTO_INSTALL_VAP" = "1" ]; then
+                    download_if_missing \
+                        "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Video-as-prompt/Wan2_1-I2V-14B-VAP_module_bf16.safetensors" \
+                        "data/comfyui/models/diffusion_models/Video-as-prompt/Wan2_1-I2V-14B-VAP_module_bf16.safetensors" \
+                    || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+                fi
 
                 download_hf_if_missing \
                     "Comfy-Org/Wan_2.2_ComfyUI_Repackaged" \
