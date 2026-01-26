@@ -204,6 +204,7 @@ if [ "$MODE" = "docker" ]; then
             clone_if_missing "https://github.com/ltdrdata/ComfyUI-Manager.git" "data/comfyui/custom_nodes/ComfyUI-Manager" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
             clone_if_missing "https://github.com/Fannovel16/comfyui_controlnet_aux.git" "data/comfyui/custom_nodes/comfyui_controlnet_aux" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
             clone_if_missing "https://github.com/cubiq/PuLID_ComfyUI.git" "data/comfyui/custom_nodes/PuLID_ComfyUI" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+            clone_if_missing "https://github.com/SethRobinson/comfyui-workflow-to-api-converter-endpoint.git" "data/comfyui/custom_nodes/comfyui-workflow-to-api-converter-endpoint" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
 
             clone_if_missing "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git" "data/comfyui/custom_nodes/ComfyUI-VideoHelperSuite" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
             clone_if_missing "https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git" "data/comfyui/custom_nodes/ComfyUI-Frame-Interpolation" || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
@@ -320,12 +321,18 @@ if [ "$MODE" = "docker" ]; then
                 "data/comfyui/models/loras/WanAnimate_relight_lora_fp16_resized_from_128_to_dynamic_22.safetensors" \
             || true
 
-            AUTO_DOWNLOAD_WAN_MODELS="${AUTO_DOWNLOAD_WAN_MODELS:-0}"
+            AUTO_DOWNLOAD_WAN_MODELS="${AUTO_DOWNLOAD_WAN_MODELS:-1}"
             if [ "$AUTO_DOWNLOAD_WAN_MODELS" = "1" ]; then
                 download_hf_if_missing \
                     "Comfy-Org/Wan_2.2_ComfyUI_Repackaged" \
                     "split_files/diffusion_models/wan2.2_animate_14B_bf16.safetensors" \
                     "data/comfyui/models/diffusion_models/wan2.2_animate_14B_bf16.safetensors" \
+                || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+
+                download_hf_if_missing \
+                    "Comfy-Org/Wan_2.2_ComfyUI_Repackaged" \
+                    "split_files/text_encoders/umt5_xxl_fp16.safetensors" \
+                    "data/comfyui/models/text_encoders/umt5_xxl_fp16.safetensors" \
                 || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
 
                 download_hf_if_missing \
@@ -385,6 +392,20 @@ if [ "$MODE" = "docker" ]; then
                     "data/comfyui/models/vae/wan_2.1_vae.safetensors" \
                 || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
 
+            fi
+
+            AUTO_DOWNLOAD_FLUX_KONTEXT_DEV="${AUTO_DOWNLOAD_FLUX_KONTEXT_DEV:-0}"
+            if [ "$AUTO_DOWNLOAD_FLUX_KONTEXT_DEV" = "1" ]; then
+                if [ -z "${HF_TOKEN:-}" ]; then
+                    echo -e "${YELLOW}⚠️  AUTO_DOWNLOAD_FLUX_KONTEXT_DEV=1 but HF_TOKEN is not set. Skipping black-forest-labs/FLUX.1-Kontext-dev download.${NC}"
+                    BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+                else
+                    download_hf_if_missing \
+                        "black-forest-labs/FLUX.1-Kontext-dev" \
+                        "flux1-kontext-dev.safetensors" \
+                        "data/comfyui/models/diffusion_models/flux1-kontext-dev.safetensors" \
+                    || BOOTSTRAP_WARNINGS=$((BOOTSTRAP_WARNINGS+1))
+                fi
             fi
         fi
     fi

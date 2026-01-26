@@ -1,4 +1,6 @@
 {
     "Comfy.InstalledVersion": "1.35.9",
-    "Comfy.TutorialCompleted": true
+    "Comfy.TutorialCompleted": true,
+    "Comfy.Minimap.Visible": true,
+    "Comfy.DevMode": true
 }

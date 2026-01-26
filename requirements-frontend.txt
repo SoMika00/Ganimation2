@@ -23,3 +23,9 @@ yt-dlp>=2024.1.0
 python-dotenv>=1.0.0
 numpy>=1.24.0
 
+# Hugging Face CLI (for gated model downloads)
+huggingface_hub[cli]>=0.20.0
+
+# Streamlit components
+streamlit-image-coordinates>=0.4.0
+

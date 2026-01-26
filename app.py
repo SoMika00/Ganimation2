@@ -287,6 +287,7 @@ with st.sidebar:
         'gallery': ('🖼️', 'Gallery', 'Browse your media'),
         'image_studio': ('🎨', 'Image Studio', 'Generate Ghibli frames'),
         'video_studio': ('🎬', 'Video Studio', 'Animate with Wan2.2'),
+        'animate_mix': ('🧩', 'Animate Mix', 'Point mask + 4 variants'),
     }
     
     for page_id, (icon, name, desc) in pages.items():
@@ -334,4 +335,8 @@ elif st.session_state.current_page == 'image_studio':
 elif st.session_state.current_page == 'video_studio':
     from views import video_studio
     video_studio.render()
+
+elif st.session_state.current_page == 'animate_mix':
+    from views import animate_mix
+    animate_mix.render()
 

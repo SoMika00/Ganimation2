@@ -10,6 +10,7 @@ import time
 import io
 import random
 import os
+import json
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -39,6 +40,8 @@ def render():
     comfyui_host = os.getenv("COMFYUI_HOST", "127.0.0.1")
     comfyui_port = int(os.getenv("COMFYUI_PORT", "8188"))
     comfyui = ComfyUIClient(host=comfyui_host, port=comfyui_port)
+
+    workflows_dir = Path(os.getenv("COMFYUI_WORKFLOWS_DIR", str(Path(__file__).parent.parent / "data" / "comfyui" / "user" / "default" / "workflows")))
     
     # Check ComfyUI status
     comfyui_available = comfyui.is_available()
@@ -212,285 +215,159 @@ def render():
     # ===== Generation Settings =====
     with col_settings:
         st.markdown("### ⚙️ Generation Settings")
-        
+
         with st.container():
-            st.markdown("**🧩 Preset (Full-body reference)**")
-            preset_full_body = st.checkbox(
-                "Use recommended full-body preset",
-                value=True,
-                help="Sets a good starting point for full-body reference images (Wan Animate friendly).",
-            )
+            st.markdown("**🧩 Workflow**")
+            selected_workflow_name = "I2M GYB.json"
+            selected_workflow_path = workflows_dir / selected_workflow_name
+            if selected_workflow_path.exists():
+                st.caption(f"Using workflow: {selected_workflow_name}")
+            else:
+                st.warning(f"Workflow not found: {selected_workflow_path}")
 
-            st.markdown("---")
+            st.session_state.comfy_selected_workflow = selected_workflow_name
 
-            # LoRA Settings
-            st.markdown("**🎨 Style (LoRA Ghibli)**")
-            lora_name = st.selectbox(
-                "LoRA File",
-                options=[
-                    "StudioGhibli.Redmond-StdGBRRedmAF-StudioGhibli.safetensors",
-                    "ghibli_style_sdxl.safetensors",
-                ],
-                index=0,
-                help="Le fichier doit exister dans ComfyUI/models/loras"
-            )
-            lora_weight = st.slider(
-                "LoRA Weight",
-                min_value=0.0,
-                max_value=1.5,
-                value=0.70 if preset_full_body else 0.75,
-                step=0.05,
-                help=(
-                    "0.5–0.8 : stylise bien sans casser le visage (reco avec PuLID)\n"
-                    "0.9–1.2 : style très fort (risque de changer les traits)\n"
-                    ">1.2 : souvent trop agressif (surtout en I2I)\n"
-                    "Reco départ (full body + garder traits) : 0.70\n"
-                    "Si rendu trop 'coloring book' → baisse LoRA et monte légèrement Canny."
+            i2i_defaults = None
+            if comfyui_available and selected_workflow_path.exists() and selected_workflow_name == "I2M GYB.json":
+                try:
+                    cache_key = f"wf_defaults::{selected_workflow_name}::{int(selected_workflow_path.stat().st_mtime)}"
+                    if st.session_state.get("_wf_defaults_cache_key") != cache_key:
+                        wf_ui = json.loads(selected_workflow_path.read_text(encoding="utf-8"))
+                        wf_api = comfyui.workflow_convert(wf_ui)
+                        if wf_api:
+                            st.session_state._wf_defaults_cache_key = cache_key
+                            st.session_state._wf_api_template = wf_api
+                            st.session_state._wf_i2i_defaults = comfyui.extract_i2i_gibly_defaults(wf_api)
+                        else:
+                            st.session_state._wf_i2i_defaults = None
+                    i2i_defaults = st.session_state.get("_wf_i2i_defaults")
+                except Exception:
+                    i2i_defaults = None
+
+            if selected_workflow_name == "I2M GYB.json":
+                if not selected_workflow_path.exists():
+                    st.warning(f"Workflow not found: {selected_workflow_path}")
+                elif not comfyui_available:
+                    st.caption("Start ComfyUI to load workflow defaults")
+                elif i2i_defaults is None:
+                    st.caption("Could not load defaults from /workflow/convert (is the converter custom node installed?)")
+
+            preset_full_body = True
+
+            if selected_workflow_name == "I2M GYB.json":
+                st.markdown("**🎨 Style (LoRA)**")
+                default_strength_model = float((i2i_defaults or {}).get("strength_model", 0.9))
+                default_strength_clip = float((i2i_defaults or {}).get("strength_clip", 1.0))
+                strength_model = st.slider(
+                    "LoRA strength_model",
+                    min_value=0.0,
+                    max_value=2.0,
+                    value=default_strength_model,
+                    step=0.05,
+                    help="Force LoRA sur le modèle (default = valeur du workflow)",
                 )
-            )
+                strength_clip = st.slider(
+                    "LoRA strength_clip",
+                    min_value=0.0,
+                    max_value=2.0,
+                    value=default_strength_clip,
+                    step=0.05,
+                    help="Force LoRA sur le CLIP (default = valeur du workflow)",
+                )
+            else:
+                # Legacy SDXL workflow controls
+                st.markdown("**🎨 Style (LoRA Ghibli)**")
+                lora_name = st.selectbox(
+                    "LoRA File",
+                    options=[
+                        "StudioGhibli.Redmond-StdGBRRedmAF-StudioGhibli.safetensors",
+                        "ghibli_style_sdxl.safetensors",
+                    ],
+                    index=0,
+                    help="Le fichier doit exister dans ComfyUI/models/loras"
+                )
+                lora_weight = st.slider(
+                    "LoRA Weight",
+                    min_value=0.0,
+                    max_value=1.5,
+                    value=0.70 if preset_full_body else 0.75,
+                    step=0.05,
+                    help=(
+                        "0.5–0.8 : stylise bien sans casser le visage (reco avec PuLID)\n"
+                        "0.9–1.2 : style très fort (risque de changer les traits)\n"
+                        ">1.2 : souvent trop agressif (surtout en I2I)\n"
+                        "Reco départ (full body + garder traits) : 0.70\n"
+                        "Si rendu trop 'coloring book' → baisse LoRA et monte légèrement Canny."
+                    )
+                )
             
             st.markdown("---")
 
-            # PuLID
-            st.markdown("**🧑 Identity (PuLID)**")
-            pulid_enabled = st.checkbox(
-                "Enable PuLID (identity preservation)",
-                value=False,
-                disabled=not pulid_available,
-                key="pulid_enabled",
-                help="Requires PuLID_ComfyUI custom nodes installed in ComfyUI",
-            )
-
-            pulid_use_frame_as_id = st.checkbox(
-                "Use selected frame as ID image",
-                value=True,
-                disabled=not pulid_enabled,
-                key="pulid_use_frame_as_id",
-            )
-
+            pulid_enabled = False
+            pulid_use_frame_as_id = True
             pulid_id_image = None
-            if pulid_enabled and not pulid_use_frame_as_id:
-                pulid_upload = st.file_uploader(
-                    "Upload ID face image",
-                    type=["png", "jpg", "jpeg", "webp"],
-                    disabled=not pulid_enabled,
-                    key="pulid_id_upload",
-                )
-                if pulid_upload is not None:
-                    pulid_id_image = Image.open(pulid_upload).convert('RGB')
-                    st.image(pulid_id_image, caption="PuLID identity image", use_container_width=True)
-
-            pulid_method = st.selectbox(
-                "PuLID method",
-                options=["fidelity", "style", "neutral"],
-                index=1,
-                disabled=not pulid_enabled,
-                help=(
-                    "style : aide à préserver l'identité même quand tu pousses le style\n"
-                    "fidelity : verrouille plus fort l'identité\n"
-                    "neutral : compromis"
-                ),
-            )
-
-            pulid_weight = st.slider(
-                "PuLID weight",
-                min_value=0.0,
-                max_value=2.0,
-                value=1.0,
-                step=0.05,
-                disabled=not pulid_enabled,
-                help=(
-                    "0.6–1.0 : garde bien l’identité sans trop bloquer le style\n"
-                    "1.0–1.4 : verrouille fort (utile si le visage dérive)\n"
-                    ">1.4 : peut figer / créer des artefacts\n"
-                    "Reco départ : 1.0"
-                ),
-            )
-
-            pulid_start = st.slider(
-                "PuLID start %",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.05,
-                step=0.05,
-                disabled=not pulid_enabled,
-                help=(
-                    "Quand PuLID s'applique pendant la diffusion.\n"
-                    "Réglage standard efficace : Start 0.05 → End 0.85\n"
-                    "Pourquoi : au début tu laisses le modèle poser le style, puis PuLID stabilise l'identité."
-                ),
-            )
-
-            pulid_end = st.slider(
-                "PuLID end %",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.85,
-                step=0.05,
-                disabled=not pulid_enabled,
-                help="Réglage standard efficace : Start 0.05 → End 0.85",
-            )
+            pulid_method = None
+            pulid_weight = None
+            pulid_start = None
+            pulid_end = None
             
             # Sampling
             st.markdown("**🔧 Sampling**")
-            
+
+            default_steps = int((i2i_defaults or {}).get("steps", 28))
+            default_guidance = float((i2i_defaults or {}).get("guidance", 2.7))
+            default_cfg = float((i2i_defaults or {}).get("cfg", 1.0))
             steps = st.slider(
                 "Steps",
-                min_value=15,
-                max_value=50,
-                value=30,
-                step=5
-            )
-            
-            cfg_scale = st.slider(
-                "CFG Scale",
-                min_value=3.0,
-                max_value=12.0,
-                value=5.0,
-                step=0.5,
-                help=(
-                    "4.5–6 : top quand tu as LoRA + PuLID + ControlNet\n"
-                    "Trop haut = 'cassant' (anatomie/traits)\n"
-                    "Reco départ : 5.0"
-                )
-            )
-
-            denoise = st.slider(
-                "Denoise (img2img strength)",
-                min_value=0.30,
-                max_value=0.95,
-                value=0.48,
-                step=0.05,
-                help=(
-                    "Le bouton principal 'photo → dessin'.\n"
-                    "0.30–0.40 : proche de la photo (stylisation modérée)\n"
-                    "0.42–0.55 : idéal pour transformer tout le corps en gardant la personne\n"
-                    "0.60+ : tu perds vite les traits\n"
-                    "Reco départ : 0.48"
-                )
-            )
-            
-            st.markdown("---")
-            
-            # ControlNet
-            st.markdown("**🎛️ ControlNet**")
-
-            controlnet_depth_enabled = st.checkbox("Enable Depth", value=True)
-            controlnet_depth_strength = st.slider(
-                "Depth weight",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.65,
-                step=0.05,
-                disabled=not controlnet_depth_enabled,
-                help=(
-                    "0.45–0.70 : bon verrou de pose et volumes\n"
-                    "Reco départ : 0.65"
-                ),
-            )
-            controlnet_depth_start = st.slider(
-                "Depth start %",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.0,
-                step=0.05,
-                disabled=not controlnet_depth_enabled,
-                help="Reco départ : Start 0.00 → End 0.85",
-            )
-            controlnet_depth_end = st.slider(
-                "Depth end %",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.85,
-                step=0.05,
-                disabled=not controlnet_depth_enabled,
-                help="Laisse la fin s'affiner sans surcontrainte. Reco : 0.85",
-            )
-
-            st.markdown("---")
-
-            controlnet_canny_enabled = st.checkbox("Enable Canny", value=True)
-            controlnet_canny_strength = st.slider(
-                "Canny weight",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.40,
-                step=0.05,
-                disabled=not controlnet_canny_enabled,
-                help="0.25–0.55 : donne du dessin sans rigidifier. Reco : 0.40",
-            )
-            controlnet_canny_start = st.slider(
-                "Canny start %",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.05,
-                step=0.05,
-                disabled=not controlnet_canny_enabled,
-                help="Reco départ : Start 0.05 → End 0.75",
-            )
-            controlnet_canny_end = st.slider(
-                "Canny end %",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.75,
-                step=0.05,
-                disabled=not controlnet_canny_enabled,
-                help="Reco départ : 0.75 (évite contours trop durs à la fin)",
-            )
-
-            canny_low_threshold = st.slider(
-                "Canny Low",
-                min_value=1,
-                max_value=255,
-                value=80,
+                min_value=5,
+                max_value=80,
+                value=default_steps,
                 step=1,
-                disabled=not controlnet_canny_enabled,
-                help=(
-                    "Seuil de détection des bords.\n"
-                    "Reco universelle photo : Low 80 / High 200\n"
-                    "Trop de bords parasites : 120 / 240\n"
-                    "Pas assez de contours : 50 / 150"
-                ),
+                help="Nombre d'itérations (default = valeur du workflow)",
             )
-            canny_high_threshold = st.slider(
-                "Canny High",
-                min_value=1,
-                max_value=255,
-                value=200,
-                step=1,
-                disabled=not controlnet_canny_enabled,
-                help=(
-                    "Seuil de détection des bords.\n"
-                    "Reco universelle photo : Low 80 / High 200\n"
-                    "Trop de bords parasites : 120 / 240\n"
-                    "Pas assez de contours : 50 / 150"
-                ),
+            cfg = st.slider(
+                "CFG",
+                min_value=0.0,
+                max_value=20.0,
+                value=default_cfg,
+                step=0.1,
+                help="CFG (default = valeur du workflow)",
             )
-
+            guidance = st.slider(
+                "GuidanceFlux (guidance)",
+                min_value=0.0,
+                max_value=20.0,
+                value=default_guidance,
+                step=0.1,
+                help="Guidance Flux (default = valeur du workflow)",
+            )
+            
             st.markdown("---")
 
             st.markdown("**📝 Prompting**")
-            prompt = st.text_area(
-                "Prompt",
-                value=(
-                    "StdGBRedmAF, Studio Ghibli, full body character, clean silhouette, hand-painted animated film look, "
-                    "soft lineart, warm pastel palette, gentle shading, watercolor-like textures, consistent anatomy, "
-                    "detailed clothing folds, clean face, natural proportions, cinematic lighting, cohesive style"
-                    if preset_full_body
-                    else "StdGBRedmAF, Studio Ghibli, anime illustration, masterpiece, high quality, detailed, beautiful lighting, soft colors, whimsical, hand-drawn aesthetic"
-                ),
-                height=120,
+            prompt_override_enabled = st.checkbox(
+                "Override workflow prompt",
+                value=False,
+                help="Par défaut, on garde le prompt dans le workflow. Active seulement si tu veux le remplacer côté Streamlit.",
             )
-            negative_prompt = st.text_area(
-                "Negative Prompt",
-                value=(
-                    "photorealistic, plastic skin, harsh shadows, noisy texture, messy lineart, deformed body, bad hands, "
-                    "extra fingers, extra limbs, text, watermark, logo"
-                    if preset_full_body
-                    else "low quality, bad anatomy, worst quality, low resolution, blurry, distorted, ugly, duplicate, watermark, signature, jpeg artifacts, photorealistic, 3d render"
-                ),
-                height=90,
-            )
+
+            default_prompt = None
+            try:
+                wf_api_cached = st.session_state.get("_wf_api_template")
+                if isinstance(wf_api_cached, dict):
+                    default_prompt = comfyui.extract_i2i_gibly_prompt_text(wf_api_cached)
+            except Exception:
+                default_prompt = None
+
+            if prompt_override_enabled:
+                prompt = st.text_area(
+                    "Prompt",
+                    value=default_prompt or "",
+                    height=120,
+                )
+            else:
+                prompt = None
+                st.caption("Using prompt from workflow")
             
             st.markdown("---")
             
@@ -523,8 +400,9 @@ def render():
             and comfyui_available
         )
         
+        generate_label = "🚀 Generate" if st.session_state.get("comfy_selected_workflow") == "I2M GYB.json" else "🚀 Generate Ghibli Frame"
         generate_btn = st.button(
-            "🚀 Generate Ghibli Frame",
+            generate_label,
             use_container_width=True,
             disabled=not can_generate,
             type="primary",
@@ -566,53 +444,75 @@ def render():
             resample = getattr(Image, "Resampling", Image).LANCZOS
             source_frame = source_frame.resize((target_w, target_h), resample)
         
-        # Prepare settings
+        # Prepare seeds
         if seed == -1:
             base_seed = random.randint(0, 2**32 - 1)
             seeds = [base_seed + i for i in range(num_variations)]
         else:
             seeds = [int(seed) + i for i in range(num_variations)]
-
-        settings = {
-            'lora_name': lora_name,
-            'lora_weight': lora_weight,
-            'cfg_scale': cfg_scale,
-            'steps': steps,
-            'seed': seed,
-            'controlnet_depth_enabled': controlnet_depth_enabled,
-            'controlnet_canny_enabled': controlnet_canny_enabled,
-            'controlnet_depth_strength': controlnet_depth_strength,
-            'controlnet_depth_start': controlnet_depth_start,
-            'controlnet_depth_end': controlnet_depth_end,
-            'controlnet_canny_strength': controlnet_canny_strength,
-            'controlnet_canny_start': controlnet_canny_start,
-            'controlnet_canny_end': controlnet_canny_end,
-            'canny_low_threshold': canny_low_threshold,
-            'canny_high_threshold': canny_high_threshold,
-            'denoise': denoise,
-            'prompt': prompt,
-            'negative_prompt': negative_prompt,
-            'pulid_enabled': pulid_enabled,
-            'pulid_file': 'pulid_v1.1.safetensors',
-            'pulid_method': pulid_method,
-            'pulid_weight': pulid_weight,
-            'pulid_start': pulid_start,
-            'pulid_end': pulid_end,
-            'pulid_provider': 'CUDA',
-            'pulid_id_image': None if pulid_use_frame_as_id else pulid_id_image,
-            'num_variations': num_variations,
-            'seeds': seeds,
-            'width': target_w,
-            'height': target_h,
-            'depth_resolution': max(target_w, target_h),
-        }
         
         try:
-            success, message, result_images = comfyui.generate_ghibli_image(
-                source_frame,
-                settings=settings,
-                progress_callback=update_progress
-            )
+            if st.session_state.get("comfy_selected_workflow") == "I2M GYB.json":
+                workflow_path = workflows_dir / "I2M GYB.json"
+                if not workflow_path.exists():
+                    raise FileNotFoundError(f"Workflow not found: {workflow_path}")
+
+                # For now we feed the selected frame as both inputs (image1/image2)
+                # until you confirm what image2 should be (e.g. mask/second ref).
+                success, message, result_images = comfyui.generate_i2i_gibly(
+                    image1=source_frame,
+                    image2=source_frame,
+                    workflow_ui_path=workflow_path,
+                    text=prompt,
+                    strength_model=float(strength_model),
+                    strength_clip=float(strength_clip),
+                    guidance=float(guidance),
+                    cfg=float(cfg),
+                    steps=int(steps),
+                    seeds=seeds,
+                    filename_prefix_base=f"ganimation_i2i_gibly_{selected_video_name}",
+                    progress_callback=update_progress,
+                )
+            else:
+                settings = {
+                    'lora_name': lora_name,
+                    'lora_weight': lora_weight,
+                    'cfg_scale': cfg_scale,
+                    'steps': steps,
+                    'seed': seed,
+                    'controlnet_depth_enabled': controlnet_depth_enabled,
+                    'controlnet_canny_enabled': controlnet_canny_enabled,
+                    'controlnet_depth_strength': controlnet_depth_strength,
+                    'controlnet_depth_start': controlnet_depth_start,
+                    'controlnet_depth_end': controlnet_depth_end,
+                    'controlnet_canny_strength': controlnet_canny_strength,
+                    'controlnet_canny_start': controlnet_canny_start,
+                    'controlnet_canny_end': controlnet_canny_end,
+                    'canny_low_threshold': canny_low_threshold,
+                    'canny_high_threshold': canny_high_threshold,
+                    'denoise': denoise,
+                    'prompt': prompt,
+                    'negative_prompt': negative_prompt,
+                    'pulid_enabled': pulid_enabled,
+                    'pulid_file': 'pulid_v1.1.safetensors',
+                    'pulid_method': pulid_method,
+                    'pulid_weight': pulid_weight,
+                    'pulid_start': pulid_start,
+                    'pulid_end': pulid_end,
+                    'pulid_provider': 'CUDA',
+                    'pulid_id_image': None if pulid_use_frame_as_id else pulid_id_image,
+                    'num_variations': num_variations,
+                    'seeds': seeds,
+                    'width': target_w,
+                    'height': target_h,
+                    'depth_resolution': max(target_w, target_h),
+                }
+
+                success, message, result_images = comfyui.generate_ghibli_image(
+                    source_frame,
+                    settings=settings,
+                    progress_callback=update_progress
+                )
             
             if success and result_images:
                 progress_bar.progress(1.0)

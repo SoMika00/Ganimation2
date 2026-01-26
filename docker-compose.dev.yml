@@ -100,6 +100,7 @@ services:
       - API_URL=http://api:8000
       - COMFYUI_HOST=comfyui
       - COMFYUI_PORT=8188
+      - COMFYUI_INPUT_DIR=/app/data/comfyui/input
       - STREAMLIT_SERVER_RUN_ON_SAVE=true
       - STREAMLIT_THEME_BASE=dark
     
@@ -109,6 +110,8 @@ services:
       - ./pages:/app/pages
       - ./utils:/app/utils
       - ./config.py:/app/config.py
+      - ./data/comfyui/user/default/workflows:/app/data/comfyui/user/default/workflows:ro
+      - ./data/comfyui/input:/app/data/comfyui/input
       # Data (read-only)
       - ./data/gallery:/data/gallery:ro
     
