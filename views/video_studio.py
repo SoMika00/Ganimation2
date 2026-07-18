@@ -1,17 +1,39 @@
-"""
+'''
 Video Studio Page
 Animate images using Wan2.2 with style transfer
-"""
+'''
 
 import streamlit as st
 from pathlib import Path
 from PIL import Image
 import time
+import os
+import requests
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.video_processor import VideoProcessor
 from utils.video_animator import VideoAnimator, PostProcessor
+
+API_BASE = os.getenv("API_URL", "http://localhost:8000/api/v1")
+
+
+def fetch_tasks():
+    try:
+        resp = requests.get(f"{API_BASE}/generation/tasks", timeout=5)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return []
+
+
+def cancel_task_api(task_id: str):
+    try:
+        resp = requests.delete(f"{API_BASE}/generation/tasks/{task_id}", timeout=5)
+        return resp.status_code == 200
+    except Exception:
+        return False
 
 
 def render():
@@ -39,6 +61,30 @@ def render():
         options=["Wan Animate 2.2 (Animate Control)"],
         index=0,
     )
+    
+    st.markdown("---")
+    
+    # Tasks overview section
+    st.markdown("### 📋 Generation Tasks")
+    tasks = fetch_tasks()
+    if tasks:
+        for task in tasks:
+            cols = st.columns([3, 2, 2, 2, 1])
+            cols[0].write(f"{task.get('type', '?')} | {task.get('status', '?')}")
+            cols[1].write(f"Progress: {task.get('progress', 0):.0%}")
+            cols[2].write(task.get('created_at', ''))
+            if task.get('status') in ('pending', 'processing'):
+                if cols[3].button("Cancel", key=f"cancel_{task['task_id']}"):
+                    if cancel_task_api(task['task_id']):
+                        st.success("Task cancelled")
+                        st.rerun()
+                    else:
+                        st.error("Failed to cancel")
+            else:
+                cols[3].write(task.get('message', ''))
+            cols[4].write(task.get('task_id', '')[:8])
+    else:
+        st.caption("No active tasks.")
     
     st.markdown("---")
     
@@ -310,5 +356,4 @@ def render():
         st.info("No generated videos yet. Create your first animation above!")
     
     st.markdown("---")
-    st.caption("New videos appear automatically in **Gallery → Generated Videos**")
-
+    st.caption("New videos appear automatically after generation.")
