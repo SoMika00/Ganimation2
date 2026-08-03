@@ -86,6 +86,13 @@ def render():
     else:
         st.caption("No active tasks.")
     
+    # Automatic polling: 4s interval while any task pending/processing
+    if tasks:
+        has_active = any(t.get('status') in ('pending', 'processing') for t in tasks)
+        if has_active:
+            time.sleep(4)
+            st.rerun()
+    
     st.markdown("---")
     
     # Main layout
@@ -316,44 +323,4 @@ def render():
                             try:
                                 tmp_video.replace(output_path)
                             except Exception:
-                                pass
-                            progress_bar.progress(1.0)
-                            status_text.markdown("**✅ Complete (no audio)!**")
-                            st.warning(f"Audio merge failed: {merge_msg}")
-                            st.success(f"🎉 Video generated: `{output_name}`")
-                            st.video(str(output_path))
-                
-        except Exception as e:
-            progress_bar.empty()
-            status_text.empty()
-            st.error(f"❌ Generation failed: {str(e)}")
-            
-            import traceback
-            with st.expander("Error Details"):
-                st.code(traceback.format_exc())
-    
-    # ===== Recent Generated Videos =====
-    st.markdown("---")
-    st.markdown("### 📽️ Recent Animations")
-    
-    recent_videos = sorted(
-        generated_videos.glob("*.mp4"),
-        key=lambda x: x.stat().st_mtime,
-        reverse=True
-    )[:4]
-    
-    if recent_videos:
-        cols = st.columns(2)
-        for idx, vid in enumerate(recent_videos):
-            with cols[idx % 2]:
-                st.video(str(vid))
-                st.caption(vid.stem)
-                
-                info = video_processor.get_video_info(vid)
-                if info:
-                    st.caption(f"⏱️ {info.get('duration', 0):.1f}s | 💾 {info.get('size_mb', 0):.1f}MB")
-    else:
-        st.info("No generated videos yet. Create your first animation above!")
-    
-    st.markdown("---")
-    st.caption("New videos appear automatically after generation.")
+                               

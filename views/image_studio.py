@@ -138,6 +138,13 @@ def render():
     else:
         st.caption("No active tasks.")
     
+    # Automatic polling: 4s interval while any task pending/processing
+    if tasks:
+        has_active = any(t.get('status') in ('pending', 'processing') for t in tasks)
+        if has_active:
+            time.sleep(4)
+            st.rerun()
+    
     st.markdown("---")
     
     # Main layout
@@ -196,7 +203,7 @@ def render():
         st.markdown("---")
         
         # Frame extraction
-        st.markdown("### 🖼️ Select Frame")
+        st.markdown("### 🖌️ Select Frame")
         
         num_frames = st.slider(
             "Number of frames to extract",
@@ -318,132 +325,3 @@ def render():
                 pulid_upload = st.file_uploader(
                     "Upload ID face image",
                     type=["png", "jpg", "jpeg", "webp"],
-                    disabled=not pulid_enabled,
-                    key="pulid_id_upload",
-                )
-                if pulid_upload is not None:
-                    pulid_id_image = Image.open(pulid_upload).convert('RGB')
-                    st.image(pulid_id_image, caption="PuLID identity image", use_container_width=True)
-
-            pulid_method = st.selectbox(
-                "PuLID method",
-                options=["fidelity", "style", "neutral"],
-                index=1,
-                disabled=not pulid_enabled,
-                help=(
-                    "style : aide à préserver l'identité même quand tu pousses le style\n"
-                    "fidelity : verrouille plus fort l'identité\n"
-                    "neutral : compromis"
-                ),
-            )
-
-            pulid_weight = st.slider(
-                "PuLID weight",
-                min_value=0.0,
-                max_value=2.0,
-                value=1.0,
-                step=0.05,
-                disabled=not pulid_enabled,
-                help=(
-                    "0.6–1.0 : garde bien l’identité sans trop bloquer le style\n"
-                    "1.0–1.4 : verrouille fort (utile si le visage dérive)\n"
-                    ">1.4 : peut figer / créer des artefacts\n"
-                    "Reco départ : 1.0"
-                ),
-            )
-
-            pulid_start = st.slider(
-                "PuLID start %",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.0,
-                step=0.05,
-                disabled=not pulid_enabled,
-            )
-            pulid_end = st.slider(
-                "PuLID end %",
-                min_value=0.0,
-                max_value=1.0,
-                value=1.0,
-                step=0.05,
-                disabled=not pulid_enabled,
-            )
-
-            st.markdown("---")
-
-            # ControlNet
-            st.markdown("**🛡️ Structure (ControlNet)**")
-            controlnet_depth_enabled = st.checkbox("Depth ControlNet", value=True)
-            controlnet_canny_enabled = st.checkbox("Canny ControlNet", value=True)
-            controlnet_strength = st.slider(
-                "ControlNet Strength",
-                min_value=0.0,
-                max_value=2.0,
-                value=0.8 if preset_full_body else 0.6,
-                step=0.05,
-            )
-
-            st.markdown("---")
-
-            # Sampling
-            st.markdown("**🎲 Sampling**")
-            cfg_scale = st.slider("CFG Scale", 1.0, 15.0, 5.0, 0.5)
-            steps = st.slider("Steps", 10, 60, 30, 5)
-            num_images = st.slider("Images", 1, 4, 1)
-
-    # Generation button
-    st.markdown("---")
-    generate_disabled = not st.session_state.get('selected_frame')
-    if st.button("🚀 Generate Ghibli Image(s)", disabled=generate_disabled, type="primary", use_container_width=True):
-        selected_frame_path = st.session_state.get('selected_frame')
-        if selected_frame_path:
-            with st.spinner("Generating..."):
-                try:
-                    source_img = Image.open(selected_frame_path).convert('RGB')
-                    settings = {
-                        'lora_name': lora_name,
-                        'lora_weight': lora_weight,
-                        'cfg_scale': cfg_scale,
-                        'steps': steps,
-                        'controlnet_depth_enabled': controlnet_depth_enabled,
-                        'controlnet_canny_enabled': controlnet_canny_enabled,
-                        'controlnet_strength': controlnet_strength,
-                        'pulid_enabled': pulid_enabled,
-                        'pulid_method': pulid_method,
-                        'pulid_weight': pulid_weight,
-                        'pulid_start': pulid_start,
-                        'pulid_end': pulid_end,
-                        'num_images': num_images,
-                    }
-                    if pulid_id_image is not None:
-                        settings['pulid_id_image'] = pulid_id_image
-                    success, msg, results = comfyui.generate_ghibli_image(
-                        source_img, settings, progress_callback=None
-                    )
-                    if success and results:
-                        for idx, img in enumerate(results):
-                            out_name = f"{selected_video_name}_ghibli_{int(time.time())}_{idx}.png"
-                            out_path = generated_images / out_name
-                            img.save(out_path)
-                        st.success(f"Generated {len(results)} image(s)!")
-                        st.balloons()
-                    else:
-                        st.error(f"Generation failed: {msg}")
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
-    
-    # Recent images
-    st.markdown("---")
-    st.markdown("### 📷 Recent Generations")
-    recent = sorted(generated_images.glob("*.png"), key=lambda x: x.stat().st_mtime, reverse=True)[:4]
-    if recent:
-        cols = st.columns(4)
-        for i, img_path in enumerate(recent):
-            with cols[i]:
-                st.image(str(img_path), use_container_width=True)
-                if st.button("Use for Video", key=f"use_{i}"):
-                    st.session_state.selected_image_for_video = str(img_path)
-                    st.session_state.current_page = 'video_studio'
-                    st.rerun()
-    else:
-        st.info("No generations yet.")
