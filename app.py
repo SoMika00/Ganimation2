@@ -1,3 +1,4 @@
+
 """
 🎬 Ganimation Studio
 AI-Powered Video Editing Platform
@@ -261,6 +262,25 @@ TEMP_DIR = Path(__file__).parent / "temp"
 for dir_path in [SOURCE_MEDIA, GENERATED_IMAGES, GENERATED_VIDEOS, TEMP_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
 
+
+from api.services.gpu_manager import GPUManager
+
+
+def _render_gpu_monitor():
+    """Live GPU memory monitor (toggleable, polls every 5s via fragment)."""
+    gpu = GPUManager()
+    info = gpu.get_info()
+    if info['num_gpus'] == 0:
+        st.caption("💻 CPU mode")
+        return
+    total_alloc = sum(g['allocated_gb'] for g in info['gpus'])
+    total_vram = sum(g['total_gb'] for g in info['gpus'])
+    st.caption(f"🖥️ {info['num_gpus']} GPU(s) • {total_alloc:.1f}/{total_vram:.1f} GB")
+    for g in info['gpus']:
+        frac = g['allocated_gb'] / g['total_gb'] if g['total_gb'] > 0 else 0
+        st.progress(frac, text=f"{g['name']}: {g['allocated_gb']:.1f}/{g['total_gb']:.1f} GB ({frac*100:.0f}%) util")
+
+
 # Sidebar Navigation
 with st.sidebar:
     st.markdown("""
@@ -270,6 +290,7 @@ with st.sidebar:
                    background: linear-gradient(135deg, #6366f1 0%, #4ade80 100%);
                    -webkit-background-clip: text;
                    -webkit-text-fill-color: transparent;
+                   background-clip: text;
                    margin: 0;">
             🎬 Ganimation
         </h1>
@@ -317,6 +338,16 @@ with st.sidebar:
     col1.metric("Source", source_count)
     col2.metric("Images", img_count)
     col3.metric("Videos", vid_count)
+
+    st.markdown("---")
+
+    # Live GPU Memory Monitor (toggleable, reuses GPUManager)
+    show_gpu = st.checkbox("🖥️ Live GPU Monitor", value=True, key="gpu_monitor_toggle")
+    if show_gpu:
+        @st.fragment(run_every=5)
+        def _gpu_frag():
+            _render_gpu_monitor()
+        _gpu_frag()
 
 # Main content area - Dynamic page loading
 if st.session_state.current_page == 'ingestion':
