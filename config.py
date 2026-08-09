@@ -1,3 +1,4 @@
+
 """
 Ganimation Studio Configuration
 Central configuration for all settings and paths
@@ -316,6 +317,59 @@ class AppConfig:
         return config
 
 
+# ============================================================================
+# User Settings Persistence (for Studio UI)
+# ============================================================================
+
+USER_SETTINGS_PATH = Path.home() / ".ganimation" / "user_settings.json"
+
+DEFAULT_USER_SETTINGS = {
+    "lora_weight": 0.70,
+    "cfg_scale": 5.0,
+    "steps": 30,
+    "motion_strength": 0.7,
+    "guidance_scale": 7.5,
+    "num_inference_steps": 40,
+    "rife_multiplier": 4,
+    "controlnet_strength": 0.6,
+}
+
+
+def load_user_settings() -> Dict[str, Any]:
+    """Load persisted user settings or return defaults."""
+    USER_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if USER_SETTINGS_PATH.exists():
+        try:
+            with open(USER_SETTINGS_PATH, 'r') as f:
+                data = json.load(f)
+            # merge with defaults to handle new keys
+            settings = DEFAULT_USER_SETTINGS.copy()
+            settings.update({k: v for k, v in data.items() if k in DEFAULT_USER_SETTINGS})
+            return settings
+        except Exception:
+            pass
+    return DEFAULT_USER_SETTINGS.copy()
+
+
+def save_user_settings(settings: Dict[str, Any]) -> None:
+    """Save user settings to disk."""
+    USER_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # only persist known keys
+    to_save = {k: settings[k] for k in DEFAULT_USER_SETTINGS if k in settings}
+    with open(USER_SETTINGS_PATH, 'w') as f:
+        json.dump(to_save, f, indent=2)
+
+
+def reset_user_settings() -> Dict[str, Any]:
+    """Clear persisted file and return defaults."""
+    if USER_SETTINGS_PATH.exists():
+        try:
+            USER_SETTINGS_PATH.unlink()
+        except Exception:
+            pass
+    return DEFAULT_USER_SETTINGS.copy()
+
+
 # Global config instance
 _config: Optional[AppConfig] = None
 
@@ -365,33 +419,4 @@ def reload_config():
 # Model download URLs
 MODEL_URLS = {
     'sdxl_base': 'https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0',
-    'lora_ghibli': 'https://huggingface.co/ntc-ai/SDXL-LoRA-slider.Studio-Ghibli-style',
-    'controlnet_depth': 'https://huggingface.co/diffusers/controlnet-depth-sdxl-1.0',
-    'controlnet_canny': 'https://huggingface.co/diffusers/controlnet-canny-sdxl-1.0',
-    'rife': 'https://github.com/megvii-research/ECCV2022-RIFE',
-    'realesrgan': 'https://github.com/xinntao/Real-ESRGAN',
-}
-
-
-# H100 Performance Tips
-H100_TIPS = """
-╔═══════════════════════════════════════════════════════════════════════════╗
-║                    🚀 H100 OPTIMIZATION GUIDE                             ║
-╠═══════════════════════════════════════════════════════════════════════════╣
-║                                                                           ║
-║  Your 2x H100 setup provides:                                             ║
-║  • 160GB total VRAM - Load full models without offloading                 ║
-║  • BFloat16 native support - Better precision than FP16                   ║
-║  • Flash Attention 2 - 3-4x faster attention computation                  ║
-║  • TF32 Tensor Cores - 8x faster than FP32 on matrix ops                  ║
-║  • Hopper architecture - Latest CUDA optimizations                        ║
-║                                                                           ║
-║  Recommended settings:                                                    ║
-║  • Batch size: 4+ for image generation                                    ║
-║  • Video frames: 96+ per generation                                       ║
-║  • RIFE multiplier: 4x for silky smooth output                            ║
-║  • Enable upscaling: Yes, you have the power                              ║
-║  • torch.compile: Enabled for 20-30% speedup                              ║
-║                                                                           ║
-╚═══════════════════════════════════════════════════════════════════════════╝
-"""
+    'lora_ghibli': 'https://huggingface.
