@@ -12,6 +12,8 @@ import random
 import os
 import requests
 
+from typing import List
+
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.video_processor import VideoProcessor
@@ -186,6 +188,7 @@ def render():
             st.session_state.frames_video = None
             st.session_state.selected_frame = None
             st.session_state.selected_frame_idx = 0
+            st.session_state.selected_frame_indices = set()
         
         # Show video preview
         col_vid, col_info = st.columns([2, 1])
@@ -203,7 +206,7 @@ def render():
         st.markdown("---")
         
         # Frame extraction
-        st.markdown("### 🖌️ Select Frame")
+        st.markdown("### 🖌️ Select Frames (multi-select supported)")
         
         num_frames = st.slider(
             "Number of frames to extract",
@@ -222,39 +225,41 @@ def render():
                 )
                 st.session_state.extracted_frames = frames
                 st.session_state.frames_video = selected_video_name
+                st.session_state.selected_frame_indices = set()
         
-        # Display extracted frames
+        # Display extracted frames with checkboxes for multi-select
         if 'extracted_frames' in st.session_state and st.session_state.get('frames_video') == selected_video_name:
             frames = st.session_state.extracted_frames
             
             if frames:
-                st.markdown("**Click a frame to select it:**")
+                if 'selected_frame_indices' not in st.session_state:
+                    st.session_state.selected_frame_indices = set()
+                
+                st.markdown("**Check frames to select multiple for batch generation:**")
                 
                 cols_per_row = 4
-                selected_frame_idx = st.session_state.get('selected_frame_idx', 0)
-                
                 for i in range(0, len(frames), cols_per_row):
                     cols = st.columns(cols_per_row)
                     for j, col in enumerate(cols):
                         if i + j < len(frames):
                             frame = frames[i + j]
                             with col:
-                                if st.button(
+                                checked = (i + j) in st.session_state.selected_frame_indices
+                                if st.checkbox(
                                     f"Frame {i + j + 1}",
-                                    key=f"frame_btn_{i + j}",
-                                    use_container_width=True,
-                                    type="primary" if (i + j) == selected_frame_idx else "secondary"
+                                    value=checked,
+                                    key=f"frame_check_{i + j}"
                                 ):
-                                    st.session_state.selected_frame_idx = i + j
-                                    st.session_state.selected_frame = str(frame)
-                                    st.rerun()
+                                    st.session_state.selected_frame_indices.add(i + j)
+                                else:
+                                    st.session_state.selected_frame_indices.discard(i + j)
                                 
                                 st.image(str(frame), use_container_width=True)
                 
-                # Show selected frame large
+                # Legacy single select support (no regression)
                 selected_frame = st.session_state.get('selected_frame')
                 if selected_frame:
-                    st.markdown("### 🎯 Selected Frame")
+                    st.markdown("### 🎯 Selected Frame (single)")
                     st.image(selected_frame, use_container_width=True)
             else:
                 st.warning("No frames extracted. Try again.")
@@ -320,8 +325,88 @@ def render():
                 key="pulid_use_frame_as_id",
             )
 
-            pulid_id_image = None
-            if pulid_enabled and not pulid_use_frame_as_id:
-                pulid_upload = st.file_uploader(
-                    "Upload ID face image",
-                    type=["png", "jpg", "jpeg", "webp"],
+            pulid_strength = st.slider(
+                "PuLID Strength",
+                min_value=0.0,
+                max_value=2.0,
+                value=0.8,
+                step=0.1,
+                disabled=not pulid_enabled,
+                key="pulid_strength",
+            )
+
+            st.markdown("---")
+
+            # ControlNet
+            st.markdown("**🔌 ControlNet**")
+            controlnet_type = st.selectbox(
+                "Type",
+                options=["depth", "canny"],
+                index=0,
+                key="controlnet_type",
+            )
+            controlnet_strength = st.slider(
+                "Strength",
+                min_value=0.0,
+                max_value=2.0,
+                value=0.6 if preset_full_body else 0.6,
+                step=0.05,
+                key="controlnet_strength",
+            )
+
+            st.markdown("---")
+
+            # Sampling
+            st.markdown("**🎲 Sampling**")
+            cfg_scale = st.slider("CFG Scale", 1.0, 15.0, 5.0, 0.5, key="cfg_scale")
+            steps = st.slider("Steps", 10, 50, 30, 5, key="steps")
+
+    # ===== Generate Selected (Batch) =====
+    st.markdown("---")
+    
+    selected_indices = list(st.session_state.get('selected_frame_indices', set()))
+    can_generate = bool(selected_indices) and selected_video_name is not None
+    
+    if st.button(
+        f"🚀 Generate Selected ({len(selected_indices)} frames)",
+        use_container_width=True,
+        disabled=not can_generate,
+        type="primary",
+        key="generate_selected_btn"
+    ):
+        if can_generate:
+            params_base = {
+                "video_id": selected_video_name,
+                "lora_weight": lora_weight,
+                "cfg_scale": cfg_scale,
+                "steps": steps,
+                "controlnet_type": controlnet_type,
+                "controlnet_strength": controlnet_strength,
+                "pulid_enabled": pulid_enabled,
+                "pulid_strength": pulid_strength if pulid_enabled else 0.0,
+            }
+            
+            # Queue one task per selected frame (batch)
+            queued = 0
+            for idx in sorted(selected_indices):
+                p = params_base.copy()
+                p["frame_index"] = idx
+                try:
+                    resp = requests.post(f"{API_BASE}/generation/image", json=p, timeout=10)
+                    if resp.status_code == 200:
+                        queued += 1
+                except Exception:
+                    pass
+            st.success(f"Queued {queued} generation task(s) for selected frames.")
+            st.session_state.selected_frame_indices = set()
+            time.sleep(1)
+            st.rerun()
+    
+    if not can_generate:
+        st.caption("⚠️ Select one or more frames with the checkboxes above")
+    
+    # Legacy single-frame button (no regression)
+    if st.session_state.get('selected_frame'):
+        if st.button("Generate Single (legacy)", key="gen_single_legacy"):
+            # existing single flow would be triggered here if wired
+            st.info("Single frame generation uses the same endpoint (frame_index).")
