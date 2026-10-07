@@ -1,16 +1,14 @@
 """
 Gallery Router
-Browse and manage media library
+Media management endpoints
 """
 
 from pathlib import Path
 from typing import Optional, List
-from datetime import datetime
-from enum import Enum
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, Field
 from loguru import logger
 
 from api.config import settings
@@ -25,204 +23,110 @@ gallery_service = GalleryService()
 # Models
 # =============================================================================
 
-class MediaType(str, Enum):
-    """Media type enum"""
-    SOURCE = "source"
-    IMAGE = "image"
-    VIDEO = "video"
-
-
-class MediaItem(BaseModel):
-    """Media item model"""
-    id: str
-    type: MediaType
-    filename: str
-    path: str
-    size_mb: float
-    created_at: datetime
-    thumbnail_url: Optional[str] = None
-    metadata: Optional[dict] = None
-
-
 class GalleryStats(BaseModel):
     """Gallery statistics"""
     source_count: int
-    source_size_mb: float
-    images_count: int
-    images_size_mb: float
-    videos_count: int
-    videos_size_mb: float
-    total_size_mb: float
+    image_count: int
+    video_count: int
+    total_count: int
+    total_size_bytes: int
 
 
-class PaginatedResponse(BaseModel):
-    """Paginated response"""
-    items: List[MediaItem]
-    total: int
-    page: int
-    page_size: int
-    total_pages: int
+class GalleryItem(BaseModel):
+    """Gallery item"""
+    id: str
+    name: str
+    type: str  # "image" or "video"
+    path: str
+    size_bytes: int
+    created_at: Optional[str] = None
+
+
+class BulkDownloadRequest(BaseModel):
+    """Bulk download request"""
+    ids: List[str] = Field(..., description="List of item IDs to download")
 
 
 # =============================================================================
-# Endpoints
+# Gallery Endpoints
 # =============================================================================
 
 @router.get("/stats", response_model=GalleryStats)
-async def get_gallery_stats():
+async def get_stats():
     """Get gallery statistics"""
-    return await gallery_service.get_stats()
+    return gallery_service.get_stats()
 
 
-@router.get("/source", response_model=PaginatedResponse)
-async def list_source_media(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    search: Optional[str] = None,
-    sort_by: str = Query("created_at", regex="^(created_at|name|size)$"),
-    order: str = Query("desc", regex="^(asc|desc)$")
-):
-    """List source media (ingested videos)"""
-    return await gallery_service.list_media(
-        media_type=MediaType.SOURCE,
-        page=page,
-        page_size=page_size,
-        search=search,
-        sort_by=sort_by,
-        order=order
-    )
+@router.get("/source", response_model=List[GalleryItem])
+async def list_source_media():
+    """List source media"""
+    return gallery_service.list_source_media()
 
 
-@router.get("/images", response_model=PaginatedResponse)
-async def list_generated_images(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    search: Optional[str] = None,
-    sort_by: str = Query("created_at", regex="^(created_at|name|size)$"),
-    order: str = Query("desc", regex="^(asc|desc)$")
-):
+@router.get("/images", response_model=List[GalleryItem])
+async def list_images():
     """List generated images"""
-    return await gallery_service.list_media(
-        media_type=MediaType.IMAGE,
-        page=page,
-        page_size=page_size,
-        search=search,
-        sort_by=sort_by,
-        order=order
-    )
+    return gallery_service.list_images()
 
 
-@router.get("/videos", response_model=PaginatedResponse)
-async def list_generated_videos(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    search: Optional[str] = None,
-    sort_by: str = Query("created_at", regex="^(created_at|name|size)$"),
-    order: str = Query("desc", regex="^(asc|desc)$")
-):
+@router.get("/videos", response_model=List[GalleryItem])
+async def list_videos():
     """List generated videos"""
-    return await gallery_service.list_media(
-        media_type=MediaType.VIDEO,
-        page=page,
-        page_size=page_size,
-        search=search,
-        sort_by=sort_by,
-        order=order
-    )
+    return gallery_service.list_videos()
 
 
-@router.get("/item/{media_type}/{item_id}", response_model=MediaItem)
-async def get_media_item(media_type: MediaType, item_id: str):
-    """Get specific media item details"""
-    item = await gallery_service.get_item(media_type, item_id)
-    
+@router.get("/file/{item_id}")
+async def get_file(item_id: str):
+    """Get a gallery file by ID"""
+    item = gallery_service.get_item(item_id)
+
     if item is None:
-        raise HTTPException(status_code=404, detail="Media item not found")
-    
-    return item
+        raise HTTPException(status_code=404, detail="Item not found")
 
+    media_type = "image/png" if item['type'] == 'image' else "video/mp4"
 
-@router.get("/item/{media_type}/{item_id}/file")
-async def get_media_file(media_type: MediaType, item_id: str):
-    """Download media file"""
-    item = await gallery_service.get_item(media_type, item_id)
-    
-    if item is None:
-        raise HTTPException(status_code=404, detail="Media item not found")
-    
-    # Determine media type for response
-    if media_type == MediaType.IMAGE:
-        content_type = "image/png"
-    else:
-        content_type = "video/mp4"
-    
     return FileResponse(
         item['path'],
-        media_type=content_type,
-        filename=item['filename']
-    )
-
-
-@router.get("/item/{media_type}/{item_id}/thumbnail")
-async def get_media_thumbnail(media_type: MediaType, item_id: str):
-    """Get media thumbnail"""
-    thumbnail_path = await gallery_service.get_thumbnail(media_type, item_id)
-    
-    if thumbnail_path is None:
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
-    
-    return FileResponse(
-        thumbnail_path,
-        media_type="image/jpeg"
-    )
-
-
-@router.delete("/item/{media_type}/{item_id}")
-async def delete_media_item(media_type: MediaType, item_id: str):
-    """Delete media item"""
-    success = await gallery_service.delete_item(media_type, item_id)
-    
-    if not success:
-        raise HTTPException(status_code=404, detail="Media item not found")
-    
-    return {"success": True, "message": "Item deleted"}
-
-
-@router.put("/item/{media_type}/{item_id}/rename")
-async def rename_media_item(media_type: MediaType, item_id: str, new_name: str):
-    """Rename media item"""
-    success = await gallery_service.rename_item(media_type, item_id, new_name)
-    
-    if not success:
-        raise HTTPException(status_code=400, detail="Rename failed")
-    
-    return {"success": True, "message": f"Renamed to {new_name}"}
-
-
-@router.post("/cleanup")
-async def cleanup_temp():
-    """Clean up temporary files"""
-    deleted_count, freed_mb = await gallery_service.cleanup_temp()
-    
-    return {
-        "success": True,
-        "deleted_files": deleted_count,
-        "freed_mb": round(freed_mb, 2)
-    }
-
-
-@router.get("/search")
-async def search_gallery(
-    query: str = Query(..., min_length=1),
-    media_type: Optional[MediaType] = None,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100)
-):
-    """Search across all gallery media"""
-    return await gallery_service.search(
-        query=query,
         media_type=media_type,
-        page=page,
-        page_size=page_size
+        filename=item['name'],
     )
 
+
+@router.post("/download")
+async def bulk_download(request: BulkDownloadRequest):
+    """
+    Bulk download gallery items as a ZIP archive.
+
+    Accepts a list of item IDs and returns a streamed ZIP file containing
+    the original filenames, preserving directory structure (`images/` or
+    `videos/`).
+    """
+    if not request.ids:
+        raise HTTPException(status_code=400, detail="No item IDs provided")
+
+    # Validate all IDs exist and belong to generated images or videos
+    items = []
+    for item_id in request.ids:
+        item = gallery_service.get_item(item_id)
+        if item is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid item ID: {item_id}",
+            )
+        if item['type'] not in ('image', 'video'):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Item is not a generated image or video: {item_id}",
+            )
+        items.append(item)
+
+    # Build the ZIP archive in memory (streamed)
+    zip_bytes = gallery_service.build_zip(items)
+
+    return StreamingResponse(
+        zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="gallery_download.zip"',
+        },
+    )
