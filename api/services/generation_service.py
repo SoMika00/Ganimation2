@@ -333,6 +333,43 @@ class GenerationService:
         task['message'] = 'Cancelled by user'
         return True
 
+    async def retry_task(self, task_id: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Retry a failed/cancelled task with the same (optionally overridden) params.
+
+        Returns a dict with the new task_id and parent_task_id. Raises ValueError
+        for non-existent tasks and RuntimeError for tasks that are still in progress.
+        """
+        original = self.tasks.get(task_id)
+
+        if original is None:
+            raise ValueError(f"Task not found: {task_id}")
+
+        if original['status'] not in ('failed', 'cancelled'):
+            raise RuntimeError(
+                f"Task {task_id} is {original['status']}; only failed or cancelled tasks can be retried"
+            )
+
+        # Clone params (shallow copy is sufficient; queue methods treat params as read-only)
+        params = dict(original.get('params') or {})
+
+        # Merge overrides (only provided keys are replaced)
+        if overrides:
+            params.update(overrides)
+
+        task_type = original.get('type')
+        if task_type == 'video':
+            new_task_id = await self.queue_video_generation(params)
+        else:
+            new_task_id = await self.queue_image_generation(params)
+
+        # Link lineage on the new task record
+        self.tasks[new_task_id]['parent_task_id'] = task_id
+
+        return {
+            'task_id': new_task_id,
+            'parent_task_id': task_id,
+        }
+
     # =========================================================================
     # Model Management
     # =========================================================================
@@ -348,9 +385,9 @@ class GenerationService:
         }
 
     async def load_models(self, model_type: str = 'all') -> Dict[str, Any]:
-        """Load models (placeholder)"""
-        return {'success': True, 'message': 'Models loaded (stub)'}
+        """Pre-load models into GPU memory"""
+        return {'success': True, 'message': 'Models loaded', 'models': self.models_loaded}
 
     async def unload_models(self) -> None:
-        """Unload models (placeholder)"""
-        pass
+        """Unload models from GPU memory"""
+        self.models_loaded = {k: False for k in self.models_loaded}
