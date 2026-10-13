@@ -247,6 +247,22 @@ async def get_task(task_id: str):
     return task
 
 
+@router.post("/tasks/{task_id}/retry")
+async def retry_task(task_id: str):
+    """Retry a failed or cancelled task with the same params"""
+    try:
+        result = await generation_service.retry_task(task_id)
+        return {
+            "success": True,
+            "task_id": result["new_task_id"],
+            "parent_task_id": result["parent_task_id"],
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
 @router.delete("/tasks/{task_id}")
 async def cancel_task(task_id: str):
     """Cancel pending task"""
@@ -334,4 +350,3 @@ async def get_presets():
             },
         },
     }
-
