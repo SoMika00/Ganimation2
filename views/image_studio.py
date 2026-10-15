@@ -40,6 +40,16 @@ def cancel_task_api(task_id: str):
         return False
 
 
+def retry_task_api(task_id: str):
+    try:
+        resp = requests.post(f"{API_BASE}/generation/tasks/{task_id}/retry", timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return None
+
+
 def render():
     """Render the Image Studio page"""
     
@@ -134,6 +144,16 @@ def render():
                         st.rerun()
                     else:
                         st.error("Failed to cancel")
+            elif task.get('status') == 'failed':
+                if cols[3].button("🔁 Retry", key=f"retry_{task['task_id']}"):
+                    result = retry_task_api(task['task_id'])
+                    if result and result.get('success'):
+                        new_id = result.get('task_id')
+                        st.success(f"Retried as {new_id}")
+                        st.rerun()
+                    else:
+                        detail = (result or {}).get('detail', 'Failed to retry task')
+                        st.error(f"Retry failed: {detail}")
             else:
                 cols[3].write(task.get('message', ''))
             cols[4].write(task.get('task_id', '')[:8])
@@ -315,98 +335,162 @@ def render():
                 value=False,
                 disabled=not pulid_available,
                 key="pulid_enabled",
-                help="Requires PuLID_ComfyUI custom nodes installed in ComfyUI",
             )
-
-            pulid_use_frame_as_id = st.checkbox(
-                "Use selected frame as ID image",
-                value=True,
-                disabled=not pulid_enabled,
-                key="pulid_use_frame_as_id",
-            )
-
-            pulid_strength = st.slider(
-                "PuLID Strength",
-                min_value=0.0,
-                max_value=2.0,
-                value=0.8,
-                step=0.1,
-                disabled=not pulid_enabled,
-                key="pulid_strength",
-            )
-
+            
             st.markdown("---")
 
             # ControlNet
-            st.markdown("**🔌 ControlNet**")
-            controlnet_type = st.selectbox(
-                "Type",
-                options=["depth", "canny"],
-                index=0,
-                key="controlnet_type",
+            st.markdown("**🧭 ControlNet (structure)**")
+            controlnet_depth_enabled = st.checkbox(
+                "Depth",
+                value=True,
+                key="controlnet_depth_enabled",
+            )
+            controlnet_canny_enabled = st.checkbox(
+                "Canny",
+                value=False,
+                key="controlnet_canny_enabled",
             )
             controlnet_strength = st.slider(
-                "Strength",
+                "ControlNet Strength",
                 min_value=0.0,
-                max_value=2.0,
-                value=0.6 if preset_full_body else 0.6,
+                max_value=1.0,
+                value=0.6,
                 step=0.05,
                 key="controlnet_strength",
             )
-
+            
             st.markdown("---")
 
             # Sampling
             st.markdown("**🎲 Sampling**")
-            cfg_scale = st.slider("CFG Scale", 1.0, 15.0, 5.0, 0.5, key="cfg_scale")
-            steps = st.slider("Steps", 10, 50, 30, 5, key="steps")
+            cfg_scale = st.slider(
+                "CFG Scale",
+                min_value=1.0,
+                max_value=15.0,
+                value=5.0,
+                step=0.5,
+                key="cfg_scale",
+            )
+            steps = st.slider(
+                "Steps",
+                min_value=10,
+                max_value=50,
+                value=30,
+                step=5,
+                key="steps",
+            )
+            seed = st.number_input(
+                "Seed (-1 = random)",
+                min_value=-1,
+                value=-1,
+                step=1,
+                key="seed",
+            )
+            
+            st.markdown("---")
 
-    # ===== Generate Selected (Batch) =====
+            # Batch
+            st.markdown("**📦 Batch**")
+            num_images = st.slider(
+                "Number of images",
+                min_value=1,
+                max_value=4,
+                value=1,
+                step=1,
+                key="num_images",
+            )
+    
+    # ===== Generate =====
     st.markdown("---")
     
-    selected_indices = list(st.session_state.get('selected_frame_indices', set()))
-    can_generate = bool(selected_indices) and selected_video_name is not None
+    can_generate = 'selected_frame_indices' in st.session_state and len(st.session_state.selected_frame_indices) > 0
     
-    if st.button(
-        f"🚀 Generate Selected ({len(selected_indices)} frames)",
+    generate_btn = st.button(
+        "🚀 Generate",
         use_container_width=True,
         disabled=not can_generate,
         type="primary",
-        key="generate_selected_btn"
-    ):
-        if can_generate:
-            params_base = {
-                "video_id": selected_video_name,
-                "lora_weight": lora_weight,
-                "cfg_scale": cfg_scale,
-                "steps": steps,
-                "controlnet_type": controlnet_type,
-                "controlnet_strength": controlnet_strength,
-                "pulid_enabled": pulid_enabled,
-                "pulid_strength": pulid_strength if pulid_enabled else 0.0,
-            }
-            
-            # Queue one task per selected frame (batch)
-            queued = 0
-            for idx in sorted(selected_indices):
-                p = params_base.copy()
-                p["frame_index"] = idx
-                try:
-                    resp = requests.post(f"{API_BASE}/generation/image", json=p, timeout=10)
-                    if resp.status_code == 200:
-                        queued += 1
-                except Exception:
-                    pass
-            st.success(f"Queued {queued} generation task(s) for selected frames.")
-            st.session_state.selected_frame_indices = set()
-            time.sleep(1)
-            st.rerun()
+        key="generate_image_btn"
+    )
     
     if not can_generate:
-        st.caption("⚠️ Select one or more frames with the checkboxes above")
+        st.caption("⚠️ Select at least one frame first")
     
-    # Legacy single-frame button (no regression)
-    if st.session_state.get('selected_frame'):
-        if st.button("Generate Single (legacy)", key="gen_single_legacy"):
-            # existing single flow would be triggered here if wired
-            st.info("Single frame generation uses the same endpoint (frame_index).")
+    if generate_btn and can_generate:
+        st.markdown("### 🎨 Generation Progress")
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        selected_indices = sorted(st.session_state.selected_frame_indices)
+        frames = st.session_state.extracted_frames
+        
+        try:
+            status_text.markdown("**🔄 Initializing...**")
+            progress_bar.progress(0.05)
+            
+            input_images = []
+            for idx in selected_indices:
+                if idx < len(frames):
+                    input_images.append(Image.open(frames[idx]).convert('RGB'))
+            
+            if not input_images:
+                progress_bar.empty()
+                status_text.empty()
+                st.error("No valid frames selected")
+            else:
+                status_text.markdown("**🎨 Generating images...**")
+                progress_bar.progress(0.2)
+                
+                settings = {
+                    'lora_weight': lora_weight,
+                    'cfg_scale': cfg_scale,
+                    'steps': steps,
+                    'seed': seed,
+                    'controlnet_strength': controlnet_strength,
+                    'controlnet_depth_enabled': controlnet_depth_enabled,
+                    'controlnet_canny_enabled': controlnet_canny_enabled,
+                    'pulid_enabled': pulid_enabled,
+                    'lora_name': lora_name,
+                }
+                
+                def _progress(p, msg):
+                    progress_bar.progress(min(0.2 + p * 0.7, 0.9))
+                    status_text.markdown(f"**{msg}**")
+                
+                all_results = []
+                for img in input_images:
+                    success, msg, results = comfyui.generate_ghibli_image(
+                        source_image=img,
+                        settings=settings,
+                        progress_callback=_progress,
+                    )
+                    if success and results:
+                        all_results.extend(results)
+                    else:
+                        st.warning(f"⚠️ {msg}")
+                
+                if all_results:
+                    status_text.markdown("**💾 Saving images...**")
+                    progress_bar.progress(0.95)
+                    
+                    run_id = time.strftime("%Y%m%d_%H%M%S")
+                    saved = []
+                    for i, result_img in enumerate(all_results):
+                        output_name = f"{selected_video_name}__{run_id}_{i:03d}.png"
+                        output_path = generated_images / output_name
+                        result_img.save(output_path)
+                        saved.append(output_name)
+                    
+                    progress_bar.progress(1.0)
+                    status_text.markdown("**✅ Complete!**")
+                    st.success(f"🎉 Generated {len(saved)} image(s): {', '.join(saved)}")
+                else:
+                    progress_bar.empty()
+                    status_text.empty()
+                    st.error("❌ Generation failed")
+        except Exception as e:
+            progress_bar.empty()
+            status_text.empty()
+            st.error(f"❌ Error: {e}")
