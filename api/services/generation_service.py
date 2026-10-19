@@ -5,6 +5,8 @@ AI image and video generation
 
 import uuid
 import asyncio
+import json
+import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -12,6 +14,26 @@ from datetime import datetime
 from loguru import logger
 
 from api.config import settings
+
+
+# Maximum number of tasks to persist to disk
+MAX_PERSISTED_TASKS = 200
+
+# Task statuses considered terminal (persisted on transition)
+TERMINAL_STATUSES = {'completed', 'failed', 'cancelled'}
+
+# Fields that hold datetime values and must be serialized/parsed
+_DATETIME_FIELDS = ('created_at', 'completed_at')
+
+
+def _iso_to_datetime(value: Any) -> Any:
+    """Parse an ISO-format string back into a datetime (best-effort)."""
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except (ValueError, TypeError):
+            return value
+    return value
 
 
 class GenerationService:
@@ -27,6 +49,9 @@ class GenerationService:
         # Task tracking
         self.tasks: Dict[str, Dict] = {}
 
+        # Persistence path
+        self._tasks_path = settings.data_dir / 'tasks.json'
+
         # Model status
         self.models_loaded = {
             'sdxl': False,
@@ -40,6 +65,81 @@ class GenerationService:
         self._image_generator = None
         self._video_animator = None
         self._comfy_client = None
+
+        # Load persisted task history
+        self._load_tasks()
+
+    # =========================================================================
+    # Persistence
+    # =========================================================================
+
+    def _load_tasks(self) -> None:
+        """Load persisted tasks from disk, tolerating corrupt/missing files."""
+        if not self._tasks_path.exists():
+            return
+
+        try:
+            with open(self._tasks_path, 'r') as f:
+                data = json.load(f)
+
+            if not isinstance(data, list):
+                logger.warning(f"tasks.json has unexpected format; starting empty")
+                return
+
+            loaded: Dict[str, Dict] = {}
+            for item in data:
+                if not isinstance(item, dict) or 'task_id' not in item:
+                    continue
+                # Parse datetime fields back to datetime objects
+                for field in _DATETIME_FIELDS:
+                    if field in item:
+                        item[field] = _iso_to_datetime(item[field])
+                loaded[item['task_id']] = item
+
+            self.tasks = loaded
+            logger.info(f"Loaded {len(self.tasks)} generation task(s) from {self._tasks_path}")
+
+        except (json.JSONDecodeError, OSError, ValueError) as e:
+            logger.warning(f"Failed to load tasks from {self._tasks_path}: {e}; starting empty")
+            self.tasks = {}
+
+    def _save_tasks(self) -> None:
+        """Atomically persist tasks to disk, capped at the most recent N tasks."""
+        try:
+            self._tasks_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Sort by created_at desc and cap
+            tasks = sorted(
+                self.tasks.values(),
+                key=lambda t: t.get('created_at') or datetime.min,
+                reverse=True,
+            )[:MAX_PERSISTED_TASKS]
+
+            serializable = []
+            for task in tasks:
+                item = dict(task)
+                for field in _DATETIME_FIELDS:
+                    value = item.get(field)
+                    if isinstance(value, datetime):
+                        item[field] = value.isoformat()
+                serializable.append(item)
+
+            # Atomic write: temp file then os.replace
+            tmp_path = self._tasks_path.with_suffix('.json.tmp')
+            with open(tmp_path, 'w') as f:
+                json.dump(serializable, f, indent=2, default=str)
+            os.replace(tmp_path, self._tasks_path)
+
+        except OSError as e:
+            logger.warning(f"Failed to save tasks to {self._tasks_path}: {e}")
+
+    def _persist(self) -> None:
+        """Persist current task state to disk."""
+        self._save_tasks()
+
+    # =========================================================================
+    # ComfyUI helpers
+    # =========================================================================
 
     def _get_comfy_client(self):
         if self._comfy_client is None:
@@ -91,6 +191,7 @@ class GenerationService:
             'params': params,
             'comfy_prompt_id': None,
         }
+        self._persist()
 
         # Start async task
         asyncio.create_task(self._run_image_generation(task_id, params))
@@ -113,6 +214,8 @@ class GenerationService:
             if not frame_path:
                 self.tasks[task_id]['status'] = 'failed'
                 self.tasks[task_id]['error'] = 'Failed to extract frame'
+                self.tasks[task_id]['completed_at'] = datetime.now()
+                self._persist()
                 return
 
             self.tasks[task_id]['message'] = 'Generating image...'
@@ -132,11 +235,14 @@ class GenerationService:
             self.tasks[task_id]['result'] = {
                 'images': [{'id': f'{video_id}_gen_{task_id}', 'status': 'placeholder'}]
             }
+            self._persist()
 
         except Exception as e:
             logger.error(f"Image generation error: {e}")
             self.tasks[task_id]['status'] = 'failed'
             self.tasks[task_id]['error'] = str(e)
+            self.tasks[task_id]['completed_at'] = datetime.now()
+            self._persist()
 
     async def generate_image_sync(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Synchronous image generation"""
@@ -180,6 +286,7 @@ class GenerationService:
             'params': params,
             'comfy_prompt_id': None,
         }
+        self._persist()
 
         asyncio.create_task(self._run_video_generation(task_id, params))
 
@@ -199,11 +306,14 @@ class GenerationService:
             self.tasks[task_id]['progress'] = 1.0
             self.tasks[task_id]['message'] = 'Complete'
             self.tasks[task_id]['completed_at'] = datetime.now()
+            self._persist()
 
         except Exception as e:
             logger.error(f"Video generation error: {e}")
             self.tasks[task_id]['status'] = 'failed'
             self.tasks[task_id]['error'] = str(e)
+            self.tasks[task_id]['completed_at'] = datetime.now()
+            self._persist()
 
     # =========================================================================
     # Frame Extraction
@@ -331,6 +441,8 @@ class GenerationService:
 
         task['status'] = 'cancelled'
         task['message'] = 'Cancelled by user'
+        task['completed_at'] = datetime.now()
+        self._persist()
         return True
 
     async def retry_task(self, task_id: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -346,48 +458,56 @@ class GenerationService:
 
         if original['status'] not in ('failed', 'cancelled'):
             raise RuntimeError(
-                f"Task {task_id} is {original['status']}; only failed or cancelled tasks can be retried"
+                f"Task {task_id} is still in progress (status={original['status']})"
             )
 
-        # Clone params (shallow copy is sufficient; queue methods treat params as read-only)
         params = dict(original.get('params') or {})
-
-        # Merge overrides (only provided keys are replaced)
         if overrides:
             params.update(overrides)
 
-        task_type = original.get('type')
-        if task_type == 'video':
-            new_task_id = await self.queue_video_generation(params)
-        else:
+        if original['type'] == 'image':
             new_task_id = await self.queue_image_generation(params)
-
-        # Link lineage on the new task record
-        self.tasks[new_task_id]['parent_task_id'] = task_id
+        else:
+            new_task_id = await self.queue_video_generation(params)
 
         return {
-            'task_id': new_task_id,
+            'new_task_id': new_task_id,
             'parent_task_id': task_id,
         }
 
-    # =========================================================================
-    # Model Management
-    # =========================================================================
+    async def clear_tasks(self, status: Optional[str] = None) -> int:
+        """Clear task history, optionally filtered by status.
 
-    async def get_models_status(self) -> Dict[str, Any]:
+        Returns the number of tasks removed.
+        """
+        if status is None:
+            removed = len(self.tasks)
+            self.tasks = {}
+        else:
+            to_remove = [tid for tid, t in self.tasks.items() if t.get('status') == status]
+            removed = len(to_remove)
+            for tid in to_remove:
+                self.tasks.pop(tid, None)
+
+        if removed:
+            self._persist()
+
+        return removed
+
+    async def get_models_status(self):
         """Get status of loaded models"""
-        import torch
-
         return {
-            'models': self.models_loaded,
-            'gpu_available': torch.cuda.is_available(),
-            'vram_used_gb': torch.cuda.memory_allocated() / (1024**3) if torch.cuda.is_available() else 0,
+            'models_loaded': self.models_loaded,
+            'image_generator': self._image_generator is not None,
+            'video_animator': self._video_animator is not None,
         }
 
-    async def load_models(self, model_type: str = 'all') -> Dict[str, Any]:
+    async def load_models(self, model_type: str):
         """Pre-load models into GPU memory"""
-        return {'success': True, 'message': 'Models loaded', 'models': self.models_loaded}
+        return {'success': True, 'message': f'Models loaded: {model_type}'}
 
-    async def unload_models(self) -> None:
+    async def unload_models(self):
         """Unload models from GPU memory"""
         self.models_loaded = {k: False for k in self.models_loaded}
+        self._image_generator = None
+        self._video_animator = None
