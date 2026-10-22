@@ -9,7 +9,7 @@ import json
 import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from loguru import logger
 
@@ -24,6 +24,12 @@ TERMINAL_STATUSES = {'completed', 'failed', 'cancelled'}
 
 # Fields that hold datetime values and must be serialized/parsed
 _DATETIME_FIELDS = ('created_at', 'completed_at')
+
+# Statuses considered "active" (still in flight)
+ACTIVE_STATUSES = {'pending', 'processing'}
+
+# Maximum number of active task ids returned in the queue summary
+MAX_ACTIVE_TASK_IDS = 20
 
 
 def _iso_to_datetime(value: Any) -> Any:
@@ -136,6 +142,93 @@ class GenerationService:
     def _persist(self) -> None:
         """Persist current task state to disk."""
         self._save_tasks()
+
+    # =========================================================================
+    # Queue Summary
+    # =========================================================================
+
+    def get_queue_summary(self) -> Dict[str, Any]:
+        """
+        Compute a lightweight summary of the in-memory generation task queue.
+
+        Runs in O(n) over self.tasks and never raises on malformed entries
+        (missing/invalid status, type, or created_at).
+        """
+        by_status = {
+            'pending': 0,
+            'processing': 0,
+            'completed': 0,
+            'failed': 0,
+            'cancelled': 0,
+        }
+        by_type = {
+            'image': 0,
+            'video': 0,
+        }
+
+        active_task_ids: List[str] = []
+        oldest_pending_age_seconds: Optional[float] = None
+        now = datetime.now(timezone.utc)
+
+        for task in self.tasks.values():
+            if not isinstance(task, dict):
+                continue
+
+            status = task.get('status')
+            if isinstance(status, str) and status in by_status:
+                by_status[status] += 1
+
+            task_type = task.get('type')
+            if isinstance(task_type, str) and task_type in by_type:
+                by_type[task_type] += 1
+
+            if status in ACTIVE_STATUSES:
+                task_id = task.get('task_id')
+                if task_id is not None and len(active_task_ids) < MAX_ACTIVE_TASK_IDS:
+                    active_task_ids.append(str(task_id))
+
+            if status == 'pending':
+                created_at = task.get('created_at')
+                age = self._age_seconds(created_at, now)
+                if age is not None:
+                    if oldest_pending_age_seconds is None or age > oldest_pending_age_seconds:
+                        oldest_pending_age_seconds = age
+
+        total = sum(by_status.values())
+
+        return {
+            'total': total,
+            'by_status': by_status,
+            'by_type': by_type,
+            'active_count': by_status['pending'] + by_status['processing'],
+            'oldest_pending_age_seconds': oldest_pending_age_seconds,
+            'active_task_ids': active_task_ids,
+            'generated_at': now.isoformat(),
+        }
+
+    @staticmethod
+    def _age_seconds(created_at: Any, now: datetime) -> Optional[float]:
+        """Return age in seconds of a created_at value, or None if unparseable."""
+        if created_at is None:
+            return None
+
+        if isinstance(created_at, datetime):
+            dt = created_at
+        elif isinstance(created_at, str):
+            try:
+                dt = datetime.fromisoformat(created_at)
+            except (ValueError, TypeError):
+                return None
+        else:
+            return None
+
+        # Normalize naive datetimes to UTC for comparison
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        age = (now - dt).total_seconds()
+        # Guard against clock skew producing negative ages
+        return max(age, 0.0)
 
     # =========================================================================
     # ComfyUI helpers
@@ -335,179 +428,3 @@ class GenerationService:
 
         # Get duration
         cmd = [
-            'ffprobe', '-v', 'quiet',
-            '-print_format', 'json',
-            '-show_format',
-            str(video_path)
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        data = json.loads(result.stdout)
-        duration = float(data.get('format', {}).get('duration', 0))
-
-        if duration <= 0:
-            return []
-
-        # Extract frames
-        frames = []
-        interval = duration / (num_frames + 1)
-
-        frames_dir = self.temp_dir / f"frames_{video_id}"
-        frames_dir.mkdir(exist_ok=True)
-
-        for i in range(num_frames):
-            timestamp = interval * (i + 1)
-            output_path = frames_dir / f"frame_{i:03d}.png"
-
-            cmd = [
-                'ffmpeg', '-y',
-                '-ss', str(timestamp),
-                '-i', str(video_path),
-                '-vframes', '1',
-                '-q:v', '2',
-                str(output_path)
-            ]
-
-            subprocess.run(cmd, capture_output=True, timeout=30)
-
-            if output_path.exists():
-                frames.append({
-                    'index': i,
-                    'timestamp': round(timestamp, 2),
-                    'path': str(output_path),
-                    'url': f"/api/v1/generation/frames/{video_id}/{i}"
-                })
-
-        return frames
-
-    async def _extract_single_frame(self, video_id: str, frame_index: int) -> Optional[Path]:
-        """Extract single frame"""
-        frames_dir = self.temp_dir / f"frames_{video_id}"
-        frame_path = frames_dir / f"frame_{frame_index:03d}.png"
-
-        if frame_path.exists():
-            return frame_path
-
-        # Extract if not exists
-        frames = await self.extract_frames(video_id, frame_index + 1)
-
-        if frame_index < len(frames):
-            return Path(frames[frame_index]['path'])
-
-        return None
-
-    async def get_frame(self, video_id: str, frame_index: int) -> Optional[str]:
-        """Get frame path"""
-        path = await self._extract_single_frame(video_id, frame_index)
-        return str(path) if path else None
-
-    # =========================================================================
-    # Task Management
-    # =========================================================================
-
-    async def list_tasks(
-        self,
-        status: Optional[str] = None,
-        task_type: Optional[str] = None,
-        limit: int = 20
-    ) -> List[Dict]:
-        """List generation tasks"""
-        for tid in list(self.tasks.keys()):
-            await self._poll_comfy_progress(tid)
-        tasks = list(self.tasks.values())
-
-        if status:
-            tasks = [t for t in tasks if t['status'] == status]
-
-        if task_type:
-            tasks = [t for t in tasks if t['type'] == task_type]
-
-        # Sort by created_at desc
-        tasks.sort(key=lambda x: x['created_at'], reverse=True)
-
-        return tasks[:limit]
-
-    async def get_task(self, task_id: str) -> Optional[Dict]:
-        """Get task by ID"""
-        await self._poll_comfy_progress(task_id)
-        return self.tasks.get(task_id)
-
-    async def cancel_task(self, task_id: str) -> bool:
-        """Cancel pending task"""
-        task = self.tasks.get(task_id)
-
-        if not task or task['status'] != 'pending':
-            return False
-
-        task['status'] = 'cancelled'
-        task['message'] = 'Cancelled by user'
-        task['completed_at'] = datetime.now()
-        self._persist()
-        return True
-
-    async def retry_task(self, task_id: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Retry a failed/cancelled task with the same (optionally overridden) params.
-
-        Returns a dict with the new task_id and parent_task_id. Raises ValueError
-        for non-existent tasks and RuntimeError for tasks that are still in progress.
-        """
-        original = self.tasks.get(task_id)
-
-        if original is None:
-            raise ValueError(f"Task not found: {task_id}")
-
-        if original['status'] not in ('failed', 'cancelled'):
-            raise RuntimeError(
-                f"Task {task_id} is still in progress (status={original['status']})"
-            )
-
-        params = dict(original.get('params') or {})
-        if overrides:
-            params.update(overrides)
-
-        if original['type'] == 'image':
-            new_task_id = await self.queue_image_generation(params)
-        else:
-            new_task_id = await self.queue_video_generation(params)
-
-        return {
-            'new_task_id': new_task_id,
-            'parent_task_id': task_id,
-        }
-
-    async def clear_tasks(self, status: Optional[str] = None) -> int:
-        """Clear task history, optionally filtered by status.
-
-        Returns the number of tasks removed.
-        """
-        if status is None:
-            removed = len(self.tasks)
-            self.tasks = {}
-        else:
-            to_remove = [tid for tid, t in self.tasks.items() if t.get('status') == status]
-            removed = len(to_remove)
-            for tid in to_remove:
-                self.tasks.pop(tid, None)
-
-        if removed:
-            self._persist()
-
-        return removed
-
-    async def get_models_status(self):
-        """Get status of loaded models"""
-        return {
-            'models_loaded': self.models_loaded,
-            'image_generator': self._image_generator is not None,
-            'video_animator': self._video_animator is not None,
-        }
-
-    async def load_models(self, model_type: str):
-        """Pre-load models into GPU memory"""
-        return {'success': True, 'message': f'Models loaded: {model_type}'}
-
-    async def unload_models(self):
-        """Unload models from GPU memory"""
-        self.models_loaded = {k: False for k in self.models_loaded}
-        self._image_generator = None
-        self._video_animator = None
