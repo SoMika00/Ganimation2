@@ -275,6 +275,21 @@ async def cancel_task(task_id: str):
 
 
 # =============================================================================
+# Queue Summary Endpoint
+# =============================================================================
+
+@router.get("/queue/summary")
+async def get_queue_summary():
+    """
+    Get a lightweight summary of the current generation queue.
+
+    Returns counts by status/type, active task ids (capped at 20),
+    and the age of the oldest pending task.
+    """
+    return generation_service.get_queue_summary()
+
+
+# =============================================================================
 # Model Management Endpoints
 # =============================================================================
 
