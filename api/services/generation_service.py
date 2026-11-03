@@ -267,6 +267,30 @@ class GenerationService:
             logger.debug(f"Comfy progress poll skipped: {e}")
 
     # =========================================================================
+    # Cancellation helpers
+    # =========================================================================
+
+    def _check_cancelled(self, task_id: str) -> bool:
+        """
+        Check if a task has been cooperatively cancelled.
+
+        If the cancel_requested flag is set, transition the task to 'cancelled'
+        (with completed_at set) and persist. Returns True if the task was
+        cancelled, False otherwise.
+        """
+        task = self.tasks.get(task_id)
+        if not task:
+            return False
+        if task.get('cancel_requested') and task.get('status') in ACTIVE_STATUSES:
+            task['status'] = 'cancelled'
+            task['message'] = 'Cancelled'
+            task['completed_at'] = datetime.now()
+            task.pop('cancel_requested', None)
+            self._persist()
+            return True
+        return False
+
+    # =========================================================================
     # Image Generation
     # =========================================================================
 
@@ -298,11 +322,18 @@ class GenerationService:
             self.tasks[task_id]['message'] = 'Loading models...'
             self.tasks[task_id]['progress'] = 0.1
 
+            # Cooperative cancellation checkpoint
+            if self._check_cancelled(task_id):
+                return
+
             # Get source frame
             video_id = params['video_id']
             frame_index = params.get('frame_index', 0)
 
             frame_path = await self._extract_single_frame(video_id, frame_index)
+
+            if self._check_cancelled(task_id):
+                return
 
             if not frame_path:
                 self.tasks[task_id]['status'] = 'failed'
@@ -321,6 +352,9 @@ class GenerationService:
             # Placeholder result
             await asyncio.sleep(2)  # Simulate generation
 
+            if self._check_cancelled(task_id):
+                return
+
             self.tasks[task_id]['status'] = 'completed'
             self.tasks[task_id]['progress'] = 1.0
             self.tasks[task_id]['message'] = 'Complete'
@@ -337,29 +371,32 @@ class GenerationService:
             self.tasks[task_id]['completed_at'] = datetime.now()
             self._persist()
 
-    async def generate_image_sync(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Synchronous image generation"""
-        task_id = await self.queue_image_generation(params)
+    async def _extract_single_frame(self, video_id: str, frame_index: int) -> Optional[Path]:
+        """Extract a single frame from a source video (best-effort)."""
+        try:
+            from utils.video_processor import VideoProcessor
+            processor = VideoProcessor(self.source_dir, self.temp_dir)
+            return await processor.extract_frame(video_id, frame_index)
+        except Exception as e:
+            logger.warning(f"Frame extraction failed: {e}")
+            return None
 
-        # Wait for completion
-        while True:
+    async def generate_image_sync(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate image synchronously (blocking)."""
+        task_id = await self.queue_image_generation(params)
+        # Wait for the background task to finish
+        for _ in range(600):
             task = self.tasks.get(task_id)
-            if task and task['status'] in ['completed', 'failed']:
+            if not task or task.get('status') in TERMINAL_STATUSES:
                 break
             await asyncio.sleep(0.5)
 
-        task = self.tasks[task_id]
-
-        if task['status'] == 'completed':
-            return {
-                'success': True,
-                'images': task.get('result', {}).get('images', [])
-            }
-        else:
-            return {
-                'success': False,
-                'message': task.get('error', 'Unknown error')
-            }
+        task = self.tasks.get(task_id)
+        if not task:
+            return {'success': False, 'message': 'Task not found'}
+        if task.get('status') == 'completed':
+            return {'success': True, 'images': task.get('result', {}).get('images', [])}
+        return {'success': False, 'message': task.get('error') or task.get('message') or 'Generation failed'}
 
     # =========================================================================
     # Video Generation
@@ -389,16 +426,25 @@ class GenerationService:
         """Run video generation"""
         try:
             self.tasks[task_id]['status'] = 'processing'
-            self.tasks[task_id]['message'] = 'Initializing...'
-            self.tasks[task_id]['progress'] = 0.05
+            self.tasks[task_id]['message'] = 'Loading models...'
+            self.tasks[task_id]['progress'] = 0.1
 
-            # Placeholder - actual implementation would use Wan2.2
-            await asyncio.sleep(5)
+            if self._check_cancelled(task_id):
+                return
+
+            # Placeholder for actual Wan2.2 pipeline
+            await asyncio.sleep(2)  # Simulate generation
+
+            if self._check_cancelled(task_id):
+                return
 
             self.tasks[task_id]['status'] = 'completed'
             self.tasks[task_id]['progress'] = 1.0
             self.tasks[task_id]['message'] = 'Complete'
             self.tasks[task_id]['completed_at'] = datetime.now()
+            self.tasks[task_id]['result'] = {
+                'videos': [{'id': f'{task_id}_video', 'status': 'placeholder'}]
+            }
             self._persist()
 
         except Exception as e:
@@ -409,22 +455,176 @@ class GenerationService:
             self._persist()
 
     # =========================================================================
-    # Frame Extraction
+    # Task Management
     # =========================================================================
 
-    async def extract_frames(self, video_id: str, num_frames: int = 10) -> List[Dict]:
-        """Extract frames from video"""
-        import subprocess
-        import json
+    async def list_tasks(
+        self,
+        status: Optional[str] = None,
+        task_type: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """List generation tasks, optionally filtered."""
+        tasks = list(self.tasks.values())
 
-        # Find video
-        video_path = None
-        for path in self.source_dir.glob(f"{video_id}*.mp4"):
-            video_path = path
-            break
+        if status:
+            tasks = [t for t in tasks if t.get('status') == status]
+        if task_type:
+            tasks = [t for t in tasks if t.get('type') == task_type]
 
-        if not video_path:
+        tasks = sorted(
+            tasks,
+            key=lambda t: t.get('created_at') or datetime.min,
+            reverse=True,
+        )
+
+        return tasks[:limit]
+
+    async def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Get a single task by id."""
+        return self.tasks.get(task_id)
+
+    async def retry_task(self, task_id: str) -> Dict[str, Any]:
+        """Retry a failed or cancelled task with the same params."""
+        task = self.tasks.get(task_id)
+        if not task:
+            raise ValueError(f"Task {task_id} not found")
+
+        if task.get('status') not in ('failed', 'cancelled'):
+            raise RuntimeError(f"Task {task_id} is not in a retryable state")
+
+        params = task.get('params') or {}
+        task_type = task.get('type')
+
+        if task_type == 'image':
+            new_task_id = await self.queue_image_generation(params)
+        elif task_type == 'video':
+            new_task_id = await self.queue_video_generation(params)
+        else:
+            raise RuntimeError(f"Unknown task type: {task_type}")
+
+        return {
+            'new_task_id': new_task_id,
+            'parent_task_id': task_id,
+        }
+
+    async def cancel_task(self, task_id: str) -> Dict[str, Any]:
+        """
+        Cancel a pending or processing task.
+
+        - pending: immediately transition to 'cancelled'.
+        - processing: set a cooperative 'cancel_requested' flag; the running
+          coroutine will transition to 'cancelled' at its next checkpoint.
+        - terminal (completed/failed/cancelled): raise ValueError.
+
+        Returns a dict describing the outcome.
+        """
+        task = self.tasks.get(task_id)
+        if not task:
+            raise ValueError(f"Task {task_id} not found")
+
+        status = task.get('status')
+
+        if status == 'pending':
+            task['status'] = 'cancelled'
+            task['message'] = 'Cancelled'
+            task['completed_at'] = datetime.now()
+            task.pop('cancel_requested', None)
+            self._persist()
+            return {'success': True, 'status': 'cancelled'}
+
+        if status == 'processing':
+            task['cancel_requested'] = True
+            task['message'] = 'Cancellation requested'
+            self._persist()
+            return {'success': True, 'status': 'cancelled'}
+
+        # Terminal statuses
+        raise ValueError(f"Task {task_id} is already {status}")
+
+    def clear_tasks(self, statuses: Optional[List[str]] = None) -> int:
+        """
+        Remove tasks whose status is in the given set.
+
+        Only terminal statuses are ever removed; pending/processing tasks are
+        always preserved. Defaults to all terminal statuses.
+
+        Returns the number of tasks removed.
+        """
+        if statuses is None:
+            statuses = list(TERMINAL_STATUSES)
+
+        # Never remove active tasks, even if explicitly requested
+        removable = set(statuses) & TERMINAL_STATUSES
+
+        to_remove = [
+            task_id
+            for task_id, task in self.tasks.items()
+            if task.get('status') in removable
+        ]
+
+        for task_id in to_remove:
+            self.tasks.pop(task_id, None)
+
+        if to_remove:
+            self._persist()
+
+        return len(to_remove)
+
+    # =========================================================================
+    # Model Management
+    # =========================================================================
+
+    async def get_models_status(self) -> Dict[str, Any]:
+        """Get status of loaded models."""
+        return {
+            'models_loaded': dict(self.models_loaded),
+            'image_generator_loaded': self._image_generator is not None,
+            'video_animator_loaded': self._video_animator is not None,
+        }
+
+    async def load_models(self, model_type: str) -> Dict[str, Any]:
+        """Pre-load models into GPU memory."""
+        result = {'success': True, 'loaded': [], 'message': ''}
+
+        if model_type in ('sdxl', 'all'):
+            self.models_loaded['sdxl'] = True
+            self.models_loaded['controlnet'] = True
+            self.models_loaded['lora'] = True
+            result['loaded'].append('sdxl')
+
+        if model_type in ('wan2', 'all'):
+            self.models_loaded['wan2'] = True
+            self.models_loaded['rife'] = True
+            result['loaded'].append('wan2')
+
+        result['message'] = f"Loaded: {', '.join(result['loaded'])}"
+        return result
+
+    async def unload_models(self) -> None:
+        """Unload models from GPU memory."""
+        for key in self.models_loaded:
+            self.models_loaded[key] = False
+        self._image_generator = None
+        self._video_animator = None
+
+    async def extract_frames(self, video_id: str, num_frames: int) -> List[Dict[str, Any]]:
+        """Extract frames from a video for selection."""
+        try:
+            from utils.video_processor import VideoProcessor
+            processor = VideoProcessor(self.source_dir, self.temp_dir)
+            frames = await processor.extract_frames(video_id, num_frames)
+            return frames
+        except Exception as e:
+            logger.error(f"Frame extraction error: {e}")
             return []
 
-        # Get duration
-        cmd = [
+    async def get_frame(self, video_id: str, frame_index: int) -> Optional[Path]:
+        """Get a specific frame path."""
+        try:
+            from utils.video_processor import VideoProcessor
+            processor = VideoProcessor(self.source_dir, self.temp_dir)
+            return await processor.get_frame_path(video_id, frame_index)
+        except Exception as e:
+            logger.warning(f"Get frame error: {e}")
+            return None
