@@ -337,7 +337,8 @@ class GenerationService:
 
             if not frame_path:
                 self.tasks[task_id]['status'] = 'failed'
-                self.tasks[task_id]['error'] = 'Failed to extract frame'
+                self.tasks[task_id]['error'] = 'Failed to extract source frame'
+                self.tasks[task_id]['message'] = 'Failed to extract source frame'
                 self.tasks[task_id]['completed_at'] = datetime.now()
                 self._persist()
                 return
@@ -345,58 +346,172 @@ class GenerationService:
             self.tasks[task_id]['message'] = 'Generating image...'
             self.tasks[task_id]['progress'] = 0.3
 
-            # Placeholder for ComfyUI path (would set comfy_prompt_id here)
-            # e.g. prompt_id = client.queue_prompt(workflow)
-            # self.tasks[task_id]['comfy_prompt_id'] = prompt_id
+            # Use ComfyUI client for generation
+            client = self._get_comfy_client()
+            from PIL import Image
+            source_image = Image.open(frame_path).convert('RGB')
 
-            # Placeholder result
-            await asyncio.sleep(2)  # Simulate generation
+            settings = {
+                'lora_weight': params.get('lora_weight', 0.75),
+                'cfg_scale': params.get('cfg_scale', 5.0),
+                'steps': params.get('steps', 30),
+                'seed': params.get('seed', -1),
+                'controlnet_type': params.get('controlnet_type', 'depth'),
+                'controlnet_strength': params.get('controlnet_strength', 0.6),
+                'controlnet_depth_enabled': params.get('controlnet_type', 'depth') == 'depth',
+                'controlnet_canny_enabled': params.get('controlnet_type', 'depth') == 'canny',
+            }
+
+            def progress_cb(progress, message):
+                self.tasks[task_id]['progress'] = 0.3 + progress * 0.6
+                self.tasks[task_id]['message'] = message
+
+            success, message, images = client.generate_ghibli_image(
+                source_image, settings, progress_callback=progress_cb
+            )
 
             if self._check_cancelled(task_id):
                 return
+
+            if not success or not images:
+                self.tasks[task_id]['status'] = 'failed'
+                self.tasks[task_id]['error'] = message
+                self.tasks[task_id]['message'] = message
+                self.tasks[task_id]['completed_at'] = datetime.now()
+                self._persist()
+                return
+
+            # Save generated images
+            saved_images = []
+            for i, img in enumerate(images):
+                filename = f"{task_id}_{i}.png"
+                output_path = self.images_dir / filename
+                img.save(output_path)
+                saved_images.append({
+                    'image_id': filename,
+                    'path': str(output_path),
+                })
 
             self.tasks[task_id]['status'] = 'completed'
             self.tasks[task_id]['progress'] = 1.0
             self.tasks[task_id]['message'] = 'Complete'
             self.tasks[task_id]['completed_at'] = datetime.now()
-            self.tasks[task_id]['result'] = {
-                'images': [{'id': f'{video_id}_gen_{task_id}', 'status': 'placeholder'}]
-            }
+            self.tasks[task_id]['result'] = {'images': saved_images}
             self._persist()
 
         except Exception as e:
-            logger.error(f"Image generation error: {e}")
+            logger.error(f"Image generation error for {task_id}: {e}")
             self.tasks[task_id]['status'] = 'failed'
             self.tasks[task_id]['error'] = str(e)
+            self.tasks[task_id]['message'] = str(e)
             self.tasks[task_id]['completed_at'] = datetime.now()
             self._persist()
 
     async def _extract_single_frame(self, video_id: str, frame_index: int) -> Optional[Path]:
-        """Extract a single frame from a source video (best-effort)."""
+        """Extract a single frame from a source video."""
+        video_path = self.source_dir / f"{video_id}.mp4"
+        if not video_path.exists():
+            # Try to find by glob
+            matches = list(self.source_dir.glob(f"{video_id}*"))
+            if not matches:
+                return None
+            video_path = matches[0]
+
+        output_path = self.temp_dir / f"frame_{video_id}_{frame_index}.png"
+
         try:
-            from utils.video_processor import VideoProcessor
-            processor = VideoProcessor(self.source_dir, self.temp_dir)
-            return await processor.extract_frame(video_id, frame_index)
+            import subprocess
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', str(video_path),
+                '-vf', f'select=eq(n\\,{frame_index})',
+                '-vframes', '1',
+                str(output_path),
+            ]
+            subprocess.run(cmd, capture_output=True, timeout=60)
+            if output_path.exists():
+                return output_path
         except Exception as e:
             logger.warning(f"Frame extraction failed: {e}")
-            return None
+
+        return None
 
     async def generate_image_sync(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Generate image synchronously (blocking)."""
         task_id = await self.queue_image_generation(params)
-        # Wait for the background task to finish
+        # Poll until terminal
         for _ in range(600):
             task = self.tasks.get(task_id)
-            if not task or task.get('status') in TERMINAL_STATUSES:
+            if task and task.get('status') in TERMINAL_STATUSES:
                 break
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
 
         task = self.tasks.get(task_id)
         if not task:
             return {'success': False, 'message': 'Task not found'}
+
         if task.get('status') == 'completed':
-            return {'success': True, 'images': task.get('result', {}).get('images', [])}
-        return {'success': False, 'message': task.get('error') or task.get('message') or 'Generation failed'}
+            return {
+                'success': True,
+                'message': 'Generation complete',
+                'images': task.get('result', {}).get('images', []),
+            }
+        return {
+            'success': False,
+            'message': task.get('error') or task.get('message') or 'Generation failed',
+        }
+
+    async def extract_frames(self, video_id: str, num_frames: int) -> List[dict]:
+        """Extract multiple frames from a source video."""
+        video_path = self.source_dir / f"{video_id}.mp4"
+        if not video_path.exists():
+            matches = list(self.source_dir.glob(f"{video_id}*"))
+            if not matches:
+                raise ValueError(f"Video not found: {video_id}")
+            video_path = matches[0]
+
+        frames = []
+        try:
+            import subprocess
+            # Get duration
+            probe = subprocess.run(
+                ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', str(video_path)],
+                capture_output=True, text=True, timeout=30
+            )
+            duration = float(json.loads(probe.stdout).get('format', {}).get('duration', 0))
+            if duration <= 0:
+                return []
+
+            interval = duration / num_frames
+            for i in range(num_frames):
+                timestamp = interval * i
+                output_path = self.temp_dir / f"frame_{video_id}_{i}.png"
+                cmd = [
+                    'ffmpeg', '-y',
+                    '-ss', str(timestamp),
+                    '-i', str(video_path),
+                    '-vframes', '1',
+                    '-q:v', '2',
+                    str(output_path),
+                ]
+                subprocess.run(cmd, capture_output=True, timeout=30)
+                if output_path.exists():
+                    frames.append({
+                        'frame_index': i,
+                        'path': str(output_path),
+                        'timestamp': timestamp,
+                    })
+        except Exception as e:
+            logger.warning(f"Frame extraction failed: {e}")
+
+        return frames
+
+    async def get_frame(self, video_id: str, frame_index: int) -> Optional[Path]:
+        """Get a specific frame path."""
+        frame_path = self.temp_dir / f"frame_{video_id}_{frame_index}.png"
+        if frame_path.exists():
+            return frame_path
+        return await self._extract_single_frame(video_id, frame_index)
 
     # =========================================================================
     # Video Generation
@@ -432,25 +547,102 @@ class GenerationService:
             if self._check_cancelled(task_id):
                 return
 
-            # Placeholder for actual Wan2.2 pipeline
-            await asyncio.sleep(2)  # Simulate generation
+            image_id = params['image_id']
+            source_video_id = params.get('source_video_id')
+
+            image_path = self.images_dir / image_id
+            if not image_path.exists():
+                matches = list(self.images_dir.glob(f"{image_id}*"))
+                if not matches:
+                    self.tasks[task_id]['status'] = 'failed'
+                    self.tasks[task_id]['error'] = f'Image not found: {image_id}'
+                    self.tasks[task_id]['message'] = f'Image not found: {image_id}'
+                    self.tasks[task_id]['completed_at'] = datetime.now()
+                    self._persist()
+                    return
+                image_path = matches[0]
+
+            source_video_path = None
+            if source_video_id:
+                source_video_path = self.source_dir / f"{source_video_id}.mp4"
+                if not source_video_path.exists():
+                    matches = list(self.source_dir.glob(f"{source_video_id}*"))
+                    if matches:
+                        source_video_path = matches[0]
+
+            self.tasks[task_id]['message'] = 'Generating video...'
+            self.tasks[task_id]['progress'] = 0.3
+
+            from PIL import Image
+            source_image = Image.open(image_path).convert('RGB')
+
+            from utils.video_animator import VideoAnimator
+            animator = VideoAnimator(self.models_dir, self.temp_dir)
+
+            def progress_cb(progress, message):
+                self.tasks[task_id]['progress'] = 0.3 + progress * 0.6
+                self.tasks[task_id]['message'] = message
+
+            settings = {
+                'motion_strength': params.get('motion_strength', 0.7),
+                'num_frames': params.get('num_frames', 96),
+                'guidance_scale': params.get('guidance_scale', 7.5),
+                'num_inference_steps': params.get('num_inference_steps', 40),
+                'use_relighting': params.get('use_relighting', False),
+                'relight_strength': params.get('relight_strength', 0.5),
+            }
+
+            success, message, frames = animator.animate(
+                source_image,
+                source_video_path if source_video_path else self.temp_dir / 'placeholder.mp4',
+                settings=settings,
+                progress_callback=progress_cb,
+            )
 
             if self._check_cancelled(task_id):
                 return
+
+            if not success or not frames:
+                self.tasks[task_id]['status'] = 'failed'
+                self.tasks[task_id]['error'] = message
+                self.tasks[task_id]['message'] = message
+                self.tasks[task_id]['completed_at'] = datetime.now()
+                self._persist()
+                return
+
+            # Save video
+            output_filename = f"{task_id}.mp4"
+            output_path = self.videos_dir / output_filename
+
+            # Encode frames to video
+            import subprocess
+            frames_dir = self.temp_dir / f"frames_{task_id}"
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            for i, frame in enumerate(frames):
+                frame.save(frames_dir / f"frame_{i:04d}.png")
+
+            cmd = [
+                'ffmpeg', '-y',
+                '-framerate', str(params.get('output_fps', 30)),
+                '-i', str(frames_dir / 'frame_%04d.png'),
+                '-c:v', 'libx264',
+                '-pix_fmt', 'yuv420p',
+                str(output_path),
+            ]
+            subprocess.run(cmd, capture_output=True, timeout=300)
 
             self.tasks[task_id]['status'] = 'completed'
             self.tasks[task_id]['progress'] = 1.0
             self.tasks[task_id]['message'] = 'Complete'
             self.tasks[task_id]['completed_at'] = datetime.now()
-            self.tasks[task_id]['result'] = {
-                'videos': [{'id': f'{task_id}_video', 'status': 'placeholder'}]
-            }
+            self.tasks[task_id]['result'] = {'video_id': output_filename, 'path': str(output_path)}
             self._persist()
 
         except Exception as e:
-            logger.error(f"Video generation error: {e}")
+            logger.error(f"Video generation error for {task_id}: {e}")
             self.tasks[task_id]['status'] = 'failed'
             self.tasks[task_id]['error'] = str(e)
+            self.tasks[task_id]['message'] = str(e)
             self.tasks[task_id]['completed_at'] = datetime.now()
             self._persist()
 
@@ -463,22 +655,78 @@ class GenerationService:
         status: Optional[str] = None,
         task_type: Optional[str] = None,
         limit: int = 20,
+        search: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """List generation tasks, optionally filtered."""
+        """
+        List generation tasks with optional filtering.
+
+        Args:
+            status: Filter by task status (pending, processing, completed, failed, cancelled).
+            task_type: Filter by task type (image, video).
+            limit: Maximum number of tasks to return (most recent first).
+            search: Case-insensitive substring match against task_id, message,
+                error, and params.video_id / params.image_id.
+
+        Returns:
+            List of task dicts, most recent first.
+        """
         tasks = list(self.tasks.values())
 
-        if status:
-            tasks = [t for t in tasks if t.get('status') == status]
-        if task_type:
-            tasks = [t for t in tasks if t.get('type') == task_type]
-
-        tasks = sorted(
-            tasks,
+        # Sort by created_at desc (most recent first)
+        tasks.sort(
             key=lambda t: t.get('created_at') or datetime.min,
             reverse=True,
         )
 
+        # Apply status filter
+        if status is not None:
+            tasks = [t for t in tasks if t.get('status') == status]
+
+        # Apply type filter
+        if task_type is not None:
+            tasks = [t for t in tasks if t.get('type') == task_type]
+
+        # Apply search filter (case-insensitive)
+        if search is not None and search.strip():
+            needle = search.strip().lower()
+            filtered = []
+            for t in tasks:
+                if self._task_matches_search(t, needle):
+                    filtered.append(t)
+            tasks = filtered
+
+        # Apply limit
         return tasks[:limit]
+
+    @staticmethod
+    def _task_matches_search(task: Dict[str, Any], needle: str) -> bool:
+        """Return True if a task matches the search needle (case-insensitive)."""
+        # task_id
+        task_id = task.get('task_id')
+        if task_id is not None and needle in str(task_id).lower():
+            return True
+
+        # message
+        message = task.get('message')
+        if message is not None and needle in str(message).lower():
+            return True
+
+        # error
+        error = task.get('error')
+        if error is not None and needle in str(error).lower():
+            return True
+
+        # params.video_id / params.image_id
+        params = task.get('params')
+        if isinstance(params, dict):
+            video_id = params.get('video_id')
+            if video_id is not None and needle in str(video_id).lower():
+                return True
+            image_id = params.get('image_id')
+            if image_id is not None and needle in str(image_id).lower():
+                return True
+
+        return False
 
     async def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Get a single task by id."""
@@ -487,8 +735,8 @@ class GenerationService:
     async def retry_task(self, task_id: str) -> Dict[str, Any]:
         """Retry a failed or cancelled task with the same params."""
         task = self.tasks.get(task_id)
-        if not task:
-            raise ValueError(f"Task {task_id} not found")
+        if task is None:
+            raise ValueError(f"Task not found: {task_id}")
 
         if task.get('status') not in ('failed', 'cancelled'):
             raise RuntimeError(f"Task {task_id} is not in a retryable state")
@@ -508,68 +756,18 @@ class GenerationService:
             'parent_task_id': task_id,
         }
 
-    async def cancel_task(self, task_id: str) -> Dict[str, Any]:
-        """
-        Cancel a pending or processing task.
-
-        - pending: immediately transition to 'cancelled'.
-        - processing: set a cooperative 'cancel_requested' flag; the running
-          coroutine will transition to 'cancelled' at its next checkpoint.
-        - terminal (completed/failed/cancelled): raise ValueError.
-
-        Returns a dict describing the outcome.
-        """
+    async def cancel_task(self, task_id: str) -> bool:
+        """Cancel a pending/processing task."""
         task = self.tasks.get(task_id)
-        if not task:
-            raise ValueError(f"Task {task_id} not found")
+        if task is None:
+            return False
 
-        status = task.get('status')
-
-        if status == 'pending':
-            task['status'] = 'cancelled'
-            task['message'] = 'Cancelled'
-            task['completed_at'] = datetime.now()
-            task.pop('cancel_requested', None)
-            self._persist()
-            return {'success': True, 'status': 'cancelled'}
-
-        if status == 'processing':
+        if task.get('status') in ACTIVE_STATUSES:
             task['cancel_requested'] = True
-            task['message'] = 'Cancellation requested'
             self._persist()
-            return {'success': True, 'status': 'cancelled'}
+            return True
 
-        # Terminal statuses
-        raise ValueError(f"Task {task_id} is already {status}")
-
-    def clear_tasks(self, statuses: Optional[List[str]] = None) -> int:
-        """
-        Remove tasks whose status is in the given set.
-
-        Only terminal statuses are ever removed; pending/processing tasks are
-        always preserved. Defaults to all terminal statuses.
-
-        Returns the number of tasks removed.
-        """
-        if statuses is None:
-            statuses = list(TERMINAL_STATUSES)
-
-        # Never remove active tasks, even if explicitly requested
-        removable = set(statuses) & TERMINAL_STATUSES
-
-        to_remove = [
-            task_id
-            for task_id, task in self.tasks.items()
-            if task.get('status') in removable
-        ]
-
-        for task_id in to_remove:
-            self.tasks.pop(task_id, None)
-
-        if to_remove:
-            self._persist()
-
-        return len(to_remove)
+        return False
 
     # =========================================================================
     # Model Management
@@ -578,53 +776,39 @@ class GenerationService:
     async def get_models_status(self) -> Dict[str, Any]:
         """Get status of loaded models."""
         return {
-            'models_loaded': dict(self.models_loaded),
+            'models_loaded': self.models_loaded,
             'image_generator_loaded': self._image_generator is not None,
             'video_animator_loaded': self._video_animator is not None,
         }
 
     async def load_models(self, model_type: str) -> Dict[str, Any]:
         """Pre-load models into GPU memory."""
-        result = {'success': True, 'loaded': [], 'message': ''}
-
         if model_type in ('sdxl', 'all'):
-            self.models_loaded['sdxl'] = True
-            self.models_loaded['controlnet'] = True
-            self.models_loaded['lora'] = True
-            result['loaded'].append('sdxl')
+            from utils.image_generator import GhibliImageGenerator
+            self._image_generator = GhibliImageGenerator(self.models_dir)
+            success, msg = self._image_generator.load_models()
+            self.models_loaded['sdxl'] = success
+            self.models_loaded['controlnet'] = success
+            self.models_loaded['lora'] = success
+            if not success:
+                return {'success': False, 'message': msg}
 
         if model_type in ('wan2', 'all'):
-            self.models_loaded['wan2'] = True
-            self.models_loaded['rife'] = True
-            result['loaded'].append('wan2')
+            from utils.video_animator import VideoAnimator
+            self._video_animator = VideoAnimator(self.models_dir, self.temp_dir)
+            success, msg = self._video_animator.load_wan_model()
+            self.models_loaded['wan2'] = success
+            if not success:
+                return {'success': False, 'message': msg}
 
-        result['message'] = f"Loaded: {', '.join(result['loaded'])}"
-        return result
+        return {'success': True, 'message': 'Models loaded'}
 
     async def unload_models(self) -> None:
         """Unload models from GPU memory."""
+        if self._image_generator is not None:
+            self._image_generator.unload_models()
+            self._image_generator = None
+        if self._video_animator is not None:
+            self._video_animator = None
         for key in self.models_loaded:
             self.models_loaded[key] = False
-        self._image_generator = None
-        self._video_animator = None
-
-    async def extract_frames(self, video_id: str, num_frames: int) -> List[Dict[str, Any]]:
-        """Extract frames from a video for selection."""
-        try:
-            from utils.video_processor import VideoProcessor
-            processor = VideoProcessor(self.source_dir, self.temp_dir)
-            frames = await processor.extract_frames(video_id, num_frames)
-            return frames
-        except Exception as e:
-            logger.error(f"Frame extraction error: {e}")
-            return []
-
-    async def get_frame(self, video_id: str, frame_index: int) -> Optional[Path]:
-        """Get a specific frame path."""
-        try:
-            from utils.video_processor import VideoProcessor
-            processor = VideoProcessor(self.source_dir, self.temp_dir)
-            return await processor.get_frame_path(video_id, frame_index)
-        except Exception as e:
-            logger.warning(f"Get frame error: {e}")
-            return None
