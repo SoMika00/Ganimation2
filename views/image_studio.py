@@ -32,6 +32,17 @@ def fetch_tasks():
     return []
 
 
+def fetch_task_detail(task_id: str):
+    """Fetch the full task dict for a single task, or None on failure."""
+    try:
+        resp = requests.get(f"{API_BASE}/generation/tasks/{task_id}", timeout=5)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return None
+
+
 def cancel_task_api(task_id: str):
     try:
         resp = requests.delete(f"{API_BASE}/generation/tasks/{task_id}", timeout=5)
@@ -48,6 +59,44 @@ def retry_task_api(task_id: str):
     except Exception:
         pass
     return None
+
+
+def _status_badge(status: str) -> str:
+    """Return a small HTML status badge for a task status."""
+    status = (status or '').lower()
+    if status == 'completed':
+        cls = 'status-ready'
+    elif status in ('pending', 'processing'):
+        cls = 'status-processing'
+    elif status in ('failed', 'cancelled'):
+        cls = 'status-error'
+    else:
+        cls = 'status-processing'
+    return f'<span class="status-badge {cls}">{status or "unknown"}</span>'
+
+
+def _render_task_detail(task: dict):
+    """Render the full detail panel for a single task."""
+    st.markdown(f"**Status:** {_status_badge(task.get('status', ''))}", unsafe_allow_html=True)
+
+    error = task.get('error')
+    if error:
+        st.error(f"**Error:** {error}")
+
+    params = task.get('params')
+    if params:
+        st.markdown("**Params:**")
+        st.json(params)
+
+    comfy_prompt_id = task.get('comfy_prompt_id')
+    if comfy_prompt_id:
+        st.markdown(f"**ComfyUI Prompt ID:** `{comfy_prompt_id}`")
+
+    duration = task.get('duration_seconds')
+    if duration is None:
+        st.markdown("**Duration:** running")
+    else:
+        st.markdown(f"**Duration:** {duration:.2f}s")
 
 
 def render():
@@ -133,30 +182,45 @@ def render():
     tasks = fetch_tasks()
     if tasks:
         for task in tasks:
-            cols = st.columns([3, 2, 2, 2, 1])
-            cols[0].write(f"{task.get('type', '?')} | {task.get('status', '?')}")
-            cols[1].write(f"Progress: {task.get('progress', 0):.0%}")
-            cols[2].write(task.get('created_at', ''))
-            if task.get('status') in ('pending', 'processing'):
-                if cols[3].button("Cancel", key=f"cancel_{task['task_id']}"):
-                    if cancel_task_api(task['task_id']):
-                        st.success("Task cancelled")
-                        st.rerun()
-                    else:
-                        st.error("Failed to cancel")
-            elif task.get('status') == 'failed':
-                if cols[3].button("🔁 Retry", key=f"retry_{task['task_id']}"):
-                    result = retry_task_api(task['task_id'])
-                    if result and result.get('success'):
-                        new_id = result.get('task_id')
-                        st.success(f"Retried as {new_id}")
-                        st.rerun()
-                    else:
-                        detail = (result or {}).get('detail', 'Failed to retry task')
-                        st.error(f"Retry failed: {detail}")
-            else:
-                cols[3].write(task.get('message', ''))
-            cols[4].write(task.get('task_id', '')[:8])
+            task_id = task.get('task_id', '')
+            status = task.get('status', '?')
+            task_type = task.get('type', '?')
+            progress = task.get('progress', 0)
+            created_at = task.get('created_at', '')
+            message = task.get('message', '')
+
+            with st.expander(f"{task_type} | {status} | {task_id[:8]}"):
+                cols = st.columns([3, 2, 2, 2, 1])
+                cols[0].write(f"{task_type} | {status}")
+                cols[1].write(f"Progress: {progress:.0%}")
+                cols[2].write(created_at)
+                if status in ('pending', 'processing'):
+                    if cols[3].button("Cancel", key=f"cancel_{task_id}"):
+                        if cancel_task_api(task_id):
+                            st.success("Task cancelled")
+                            st.rerun()
+                        else:
+                            st.error("Failed to cancel")
+                elif status == 'failed':
+                    if cols[3].button("🔁 Retry", key=f"retry_{task_id}"):
+                        result = retry_task_api(task_id)
+                        if result and result.get('success'):
+                            new_id = result.get('task_id')
+                            st.success(f"Retried as {new_id}")
+                            st.rerun()
+                        else:
+                            detail = (result or {}).get('detail', 'Failed to retry task')
+                            st.error(f"Retry failed: {detail}")
+                else:
+                    cols[3].write(message)
+                cols[4].write(task_id[:8])
+
+                # Lazy detail fetch on demand
+                detail = fetch_task_detail(task_id)
+                if detail:
+                    _render_task_detail(detail)
+                else:
+                    st.caption("Could not load task details.")
     else:
         st.caption("No active tasks.")
     
@@ -316,181 +380,3 @@ def render():
                 min_value=0.0,
                 max_value=1.5,
                 value=0.70 if preset_full_body else 0.75,
-                step=0.05,
-                help=(
-                    "0.5–0.8 : stylise bien sans casser le visage (reco avec PuLID)\n"
-                    "0.9–1.2 : style très fort (risque de changer les traits)\n"
-                    ">1.2 : souvent trop agressif (surtout en I2I)\n"
-                    "Reco départ (full body + garder traits) : 0.70\n"
-                    "Si rendu trop 'coloring book' → baisse LoRA et monte légèrement Canny."
-                )
-            )
-            
-            st.markdown("---")
-
-            # PuLID
-            st.markdown("**🧑 Identity (PuLID)**")
-            pulid_enabled = st.checkbox(
-                "Enable PuLID (identity preservation)",
-                value=False,
-                disabled=not pulid_available,
-                key="pulid_enabled",
-            )
-            
-            st.markdown("---")
-
-            # ControlNet
-            st.markdown("**🧭 ControlNet (structure)**")
-            controlnet_depth_enabled = st.checkbox(
-                "Depth",
-                value=True,
-                key="controlnet_depth_enabled",
-            )
-            controlnet_canny_enabled = st.checkbox(
-                "Canny",
-                value=False,
-                key="controlnet_canny_enabled",
-            )
-            controlnet_strength = st.slider(
-                "ControlNet Strength",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.6,
-                step=0.05,
-                key="controlnet_strength",
-            )
-            
-            st.markdown("---")
-
-            # Sampling
-            st.markdown("**🎲 Sampling**")
-            cfg_scale = st.slider(
-                "CFG Scale",
-                min_value=1.0,
-                max_value=15.0,
-                value=5.0,
-                step=0.5,
-                key="cfg_scale",
-            )
-            steps = st.slider(
-                "Steps",
-                min_value=10,
-                max_value=50,
-                value=30,
-                step=5,
-                key="steps",
-            )
-            seed = st.number_input(
-                "Seed (-1 = random)",
-                min_value=-1,
-                value=-1,
-                step=1,
-                key="seed",
-            )
-            
-            st.markdown("---")
-
-            # Batch
-            st.markdown("**📦 Batch**")
-            num_images = st.slider(
-                "Number of images",
-                min_value=1,
-                max_value=4,
-                value=1,
-                step=1,
-                key="num_images",
-            )
-    
-    # ===== Generate =====
-    st.markdown("---")
-    
-    can_generate = 'selected_frame_indices' in st.session_state and len(st.session_state.selected_frame_indices) > 0
-    
-    generate_btn = st.button(
-        "🚀 Generate",
-        use_container_width=True,
-        disabled=not can_generate,
-        type="primary",
-        key="generate_image_btn"
-    )
-    
-    if not can_generate:
-        st.caption("⚠️ Select at least one frame first")
-    
-    if generate_btn and can_generate:
-        st.markdown("### 🎨 Generation Progress")
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        selected_indices = sorted(st.session_state.selected_frame_indices)
-        frames = st.session_state.extracted_frames
-        
-        try:
-            status_text.markdown("**🔄 Initializing...**")
-            progress_bar.progress(0.05)
-            
-            input_images = []
-            for idx in selected_indices:
-                if idx < len(frames):
-                    input_images.append(Image.open(frames[idx]).convert('RGB'))
-            
-            if not input_images:
-                progress_bar.empty()
-                status_text.empty()
-                st.error("No valid frames selected")
-            else:
-                status_text.markdown("**🎨 Generating images...**")
-                progress_bar.progress(0.2)
-                
-                settings = {
-                    'lora_weight': lora_weight,
-                    'cfg_scale': cfg_scale,
-                    'steps': steps,
-                    'seed': seed,
-                    'controlnet_strength': controlnet_strength,
-                    'controlnet_depth_enabled': controlnet_depth_enabled,
-                    'controlnet_canny_enabled': controlnet_canny_enabled,
-                    'pulid_enabled': pulid_enabled,
-                    'lora_name': lora_name,
-                }
-                
-                def _progress(p, msg):
-                    progress_bar.progress(min(0.2 + p * 0.7, 0.9))
-                    status_text.markdown(f"**{msg}**")
-                
-                all_results = []
-                for img in input_images:
-                    success, msg, results = comfyui.generate_ghibli_image(
-                        source_image=img,
-                        settings=settings,
-                        progress_callback=_progress,
-                    )
-                    if success and results:
-                        all_results.extend(results)
-                    else:
-                        st.warning(f"⚠️ {msg}")
-                
-                if all_results:
-                    status_text.markdown("**💾 Saving images...**")
-                    progress_bar.progress(0.95)
-                    
-                    run_id = time.strftime("%Y%m%d_%H%M%S")
-                    saved = []
-                    for i, result_img in enumerate(all_results):
-                        output_name = f"{selected_video_name}__{run_id}_{i:03d}.png"
-                        output_path = generated_images / output_name
-                        result_img.save(output_path)
-                        saved.append(output_name)
-                    
-                    progress_bar.progress(1.0)
-                    status_text.markdown("**✅ Complete!**")
-                    st.success(f"🎉 Generated {len(saved)} image(s): {', '.join(saved)}")
-                else:
-                    progress_bar.empty()
-                    status_text.empty()
-                    st.error("❌ Generation failed")
-        except Exception as e:
-            progress_bar.empty()
-            status_text.empty()
-            st.error(f"❌ Error: {e}")
