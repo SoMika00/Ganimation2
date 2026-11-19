@@ -290,6 +290,21 @@ async def get_queue_summary():
 
 
 # =============================================================================
+# Metrics Endpoint
+# =============================================================================
+
+@router.get("/metrics")
+async def get_metrics():
+    """
+    Get generation throughput and duration statistics.
+
+    Returns per-type (image/video) and overall counts plus duration
+    statistics, and last-hour/last-24h throughput windows.
+    """
+    return generation_service.get_metrics_summary()
+
+
+# =============================================================================
 # Model Management Endpoints
 # =============================================================================
 
