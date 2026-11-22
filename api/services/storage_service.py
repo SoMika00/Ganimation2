@@ -5,6 +5,7 @@ Computes disk usage and storage health for configured directories.
 
 import os
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -15,6 +16,9 @@ from api.config import settings
 # Thresholds for storage health status
 WARNING_THRESHOLD = 85.0
 CRITICAL_THRESHOLD = 95.0
+
+# Valid cleanup target names
+VALID_CLEANUP_TARGETS = {'temp', 'generated_images', 'generated_videos'}
 
 
 class StorageService:
@@ -148,5 +152,107 @@ class StorageService:
         return {
             "status": status,
             "directories": directories,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _target_directories(self, targets: Optional[List[str]]) -> List[Path]:
+        """Resolve cleanup target names to directory paths."""
+        if targets is None:
+            targets = ["temp"]
+
+        mapping = {
+            "temp": settings.temp_dir,
+            "generated_images": settings.generated_images_dir,
+            "generated_videos": settings.generated_videos_dir,
+        }
+
+        directories: List[Path] = []
+        for target in targets:
+            path = mapping.get(target)
+            if path is not None:
+                directories.append(Path(path))
+        return directories
+
+    def cleanup(
+        self,
+        dry_run: bool = True,
+        older_than_hours: int = 24,
+        targets: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Delete stale files from configured directories.
+
+        Scans the configured directories (default: temp_dir only, plus
+        optionally generated_images_dir / generated_videos_dir when named in
+        targets). Deletes files whose mtime is older than older_than_hours.
+        Never deletes .gitkeep files or directories.
+
+        Returns a structured dict with deleted_count, freed_bytes, freed_human,
+        files, errors, and generated_at. Never raises.
+        """
+        cutoff = time.time() - (older_than_hours * 3600)
+        directories = self._target_directories(targets)
+
+        files: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        deleted_count = 0
+        deleted_bytes = 0
+
+        for directory in directories:
+            try:
+                if not directory.exists():
+                    continue
+                for entry in os.scandir(directory):
+                    try:
+                        if entry.name == ".gitkeep":
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+
+                        try:
+                            stat = entry.stat()
+                        except OSError as e:
+                            errors.append(f"{entry.path}: {e}")
+                            continue
+
+                        if stat.st_mtime >= cutoff:
+                            continue
+
+                        size_bytes = stat.st_size
+                        files.append({
+                            "path": entry.path,
+                            "size_bytes": size_bytes,
+                            "size_human": self._human_bytes(size_bytes),
+                            "mtime": datetime.fromtimestamp(
+                                stat.st_mtime, tz=timezone.utc
+                            ).isoformat(),
+                        })
+                        deleted_count += 1
+                        deleted_bytes += size_bytes
+
+                        if not dry_run:
+                            try:
+                                os.remove(entry.path)
+                            except OSError as e:
+                                errors.append(f"{entry.path}: {e}")
+                                deleted_count -= 1
+                                deleted_bytes -= size_bytes
+                                files.pop()
+                    except OSError as e:
+                        errors.append(f"{entry.path}: {e}")
+            except OSError as e:
+                errors.append(f"{directory}: {e}")
+
+        return {
+            "dry_run": dry_run,
+            "deleted_count": deleted_count,
+            "deleted_bytes": deleted_bytes,
+            "deleted_human": self._human_bytes(deleted_bytes),
+            "freed_bytes": deleted_bytes,
+            "freed_human": self._human_bytes(deleted_bytes),
+            "files": files,
+            "errors": errors,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
