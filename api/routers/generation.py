@@ -109,6 +109,14 @@ class GenerationTask(BaseModel):
     error: Optional[str] = None
 
 
+class TaskListResponse(BaseModel):
+    """Paginated list of generation tasks"""
+    items: List[GenerationTask]
+    total: int
+    limit: int
+    offset: int
+
+
 # =============================================================================
 # Image Generation Endpoints
 # =============================================================================
@@ -222,17 +230,21 @@ async def generate_video(request: VideoGenerationRequest, background_tasks: Back
 # Task Management Endpoints
 # =============================================================================
 
-@router.get("/tasks", response_model=List[GenerationTask])
+@router.get("/tasks", response_model=TaskListResponse)
 async def list_tasks(
     status: Optional[str] = Query(None, regex="^(pending|processing|completed|failed)$"),
     type: Optional[str] = Query(None, regex="^(image|video)$"),
-    limit: int = Query(20, ge=1, le=100)
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    search: Optional[str] = Query(None, max_length=200)
 ):
-    """List generation tasks"""
+    """List generation tasks with optional filtering and pagination"""
     return await generation_service.list_tasks(
         status=status,
         task_type=type,
-        limit=limit
+        limit=limit,
+        offset=offset,
+        search=search
     )
 
 
