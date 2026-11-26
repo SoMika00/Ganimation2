@@ -31,6 +31,10 @@ ACTIVE_STATUSES = {'pending', 'processing'}
 # Maximum number of active task ids returned in the queue summary
 MAX_ACTIVE_TASK_IDS = 20
 
+# Valid task statuses / types (used for filtering)
+VALID_STATUSES = {'pending', 'processing', 'completed', 'failed', 'cancelled'}
+VALID_TYPES = {'image', 'video'}
+
 
 def _iso_to_datetime(value: Any) -> Any:
     """Parse an ISO-format string back into a datetime (best-effort)."""
@@ -39,6 +43,13 @@ def _iso_to_datetime(value: Any) -> Any:
             return datetime.fromisoformat(value)
         except (ValueError, TypeError):
             return value
+    return value
+
+
+def _serialize_datetime(value: Any) -> Any:
+    """Serialize a datetime (or ISO string) to an ISO-format string."""
+    if isinstance(value, datetime):
+        return value.isoformat()
     return value
 
 
@@ -142,6 +153,55 @@ class GenerationService:
     def _persist(self) -> None:
         """Persist current task state to disk."""
         self._save_tasks()
+
+    # =========================================================================
+    # Filtering
+    # =========================================================================
+
+    def _filter_tasks(
+        self,
+        status: Optional[str] = None,
+        task_type: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Return all tasks matching the given filters, sorted by created_at
+        descending (most recent first).
+
+        - status: exact match on task status (pending/processing/completed/
+          failed/cancelled).
+        - task_type: exact match on task type (image/video).
+        - search: case-insensitive substring match against task_id, message,
+          and error fields.
+        """
+        tasks = list(self.tasks.values())
+
+        if status is not None:
+            tasks = [t for t in tasks if t.get('status') == status]
+
+        if task_type is not None:
+            tasks = [t for t in tasks if t.get('type') == task_type]
+
+        if search:
+            needle = search.lower()
+            filtered = []
+            for t in tasks:
+                haystacks = [
+                    str(t.get('task_id') or ''),
+                    str(t.get('message') or ''),
+                    str(t.get('error') or ''),
+                ]
+                if any(needle in h.lower() for h in haystacks):
+                    filtered.append(t)
+            tasks = filtered
+
+        # Sort by created_at desc (most recent first), tolerating missing values
+        tasks.sort(
+            key=lambda t: t.get('created_at') or datetime.min,
+            reverse=True,
+        )
+
+        return tasks
 
     # =========================================================================
     # Queue Summary
@@ -356,17 +416,14 @@ class GenerationService:
                 overall['avg_duration_seconds'] = round(avg, 2)
                 overall['p50_duration_seconds'] = round(p50, 2)
                 overall['max_duration_seconds'] = round(mx, 2)
-            else:
+            elif key in by_type:
                 by_type[key]['avg_duration_seconds'] = round(avg, 2)
                 by_type[key]['p50_duration_seconds'] = round(p50, 2)
                 by_type[key]['max_duration_seconds'] = round(mx, 2)
 
-        total = sum(by_type[t]['completed_count'] + by_type[t]['failed_count'] + by_type[t]['cancelled_count'] for t in by_type)
-
         return {
-            'total': total,
-            'by_type': by_type,
             'overall': overall,
+            'by_type': by_type,
             'throughput_last_hour': throughput_last_hour,
             'throughput_last_24h': throughput_last_24h,
             'generated_at': now.isoformat(),
@@ -374,184 +431,64 @@ class GenerationService:
 
     @staticmethod
     def _percentile(values: List[float], pct: float) -> float:
-        """Return the pct-th percentile of a list of numbers (nearest-rank)."""
+        """Compute a percentile from a list of numeric values."""
         if not values:
             return 0.0
         sorted_values = sorted(values)
-        idx = max(0, int(round((pct / 100.0) * len(sorted_values))) - 1)
-        return sorted_values[idx]
+        k = (len(sorted_values) - 1) * (pct / 100.0)
+        f = int(k)
+        c = min(f + 1, len(sorted_values) - 1)
+        if f == c:
+            return sorted_values[f]
+        return sorted_values[f] + (sorted_values[c] - sorted_values[f]) * (k - f)
 
     # =========================================================================
-    # ComfyUI helpers
+    # Task Listing / Export
     # =========================================================================
 
-    def _get_comfy_client(self):
-        if self._comfy_client is None:
-            from utils.comfyui_client import ComfyUIClient
-            self._comfy_client = ComfyUIClient()
-        return self._comfy_client
+    async def list_tasks(
+        self,
+        status: Optional[str] = None,
+        task_type: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+        search: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """List generation tasks with optional filtering and pagination."""
+        tasks = self._filter_tasks(status=status, task_type=task_type, search=search)
 
-    async def _poll_comfy_progress(self, task_id: str) -> None:
-        """Non-blocking poll of ComfyUI /history and queue for progress update."""
-        task = self.tasks.get(task_id)
-        if not task or 'comfy_prompt_id' not in task or not task.get('comfy_prompt_id'):
-            return
-        prompt_id = task['comfy_prompt_id']
-        try:
-            client = self._get_comfy_client()
-            # Use existing client methods (non-blocking, best-effort)
-            history = client.get_history() or {}
-            queue = client.get_queue() or {}
-            # Update progress if present in history for this prompt
-            if prompt_id in history:
-                # ComfyUI history entries may contain 'status' or outputs; treat as completed
-                task['progress'] = 1.0
-                task['status'] = 'completed'
-                task['message'] = 'Complete'
-            else:
-                # Check queue for running status (simple heuristic)
-                running = queue.get('queue_running', []) if isinstance(queue, dict) else []
-                if any(str(prompt_id) in str(item) for item in running):
-                    task['progress'] = min(task.get('progress', 0.1) + 0.1, 0.9)
-                    task['message'] = 'Processing in ComfyUI'
-        except Exception as e:
-            logger.debug(f"Comfy progress poll skipped: {e}")
+        total = len(tasks)
+        page = tasks[offset:offset + limit]
 
-    # =========================================================================
-    # Cancellation helpers
-    # =========================================================================
+        items = []
+        for task in page:
+            items.append(self._serialize_task(task))
 
-    def _check_cancelled(self, task_id: str) -> bool:
-        """
-        Check if a task has been cooperatively cancelled.
-
-        If the cancel_requested flag is set, transition the task to 'cancelled'
-        (with completed_at set) and persist. Returns True if the task was
-        cancelled, False otherwise.
-        """
-        task = self.tasks.get(task_id)
-        if not task:
-            return False
-        if task.get('cancel_requested') and task.get('status') in ACTIVE_STATUSES:
-            task['status'] = 'cancelled'
-            task['message'] = 'Cancelled'
-            task['completed_at'] = datetime.now()
-            task['duration_seconds'] = self._duration_seconds(task)
-            task.pop('cancel_requested', None)
-            self._persist()
-            return True
-        return False
-
-    # =========================================================================
-    # Image Generation
-    # =========================================================================
-
-    async def queue_image_generation(self, params: Dict[str, Any]) -> str:
-        """Queue image generation task"""
-        task_id = str(uuid.uuid4())[:8]
-
-        self.tasks[task_id] = {
-            'task_id': task_id,
-            'type': 'image',
-            'status': 'pending',
-            'progress': 0.0,
-            'message': 'Queued',
-            'created_at': datetime.now(),
-            'params': params,
-            'comfy_prompt_id': None,
+        return {
+            'items': items,
+            'total': total,
+            'limit': limit,
+            'offset': offset,
         }
-        self._persist()
 
-        # Start async task
-        asyncio.create_task(self._run_image_generation(task_id, params))
+    def _serialize_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Serialize a task dict for API output (datetimes -> ISO strings)."""
+        item = dict(task)
+        for field in _DATETIME_FIELDS:
+            if field in item:
+                item[field] = _serialize_datetime(item[field])
+        return item
 
-        return task_id
-
-    async def _run_image_generation(self, task_id: str, params: Dict[str, Any]):
-        """Run image generation"""
-        try:
-            self.tasks[task_id]['status'] = 'processing'
-            self.tasks[task_id]['message'] = 'Loading models...'
-            self.tasks[task_id]['progress'] = 0.1
-
-            # Cooperative cancellation checkpoint
-            if self._check_cancelled(task_id):
-                return
-
-            # Get source frame
-            video_id = params['video_id']
-            frame_index = params.get('frame_index', 0)
-
-            frame_path = await self._extract_single_frame(video_id, frame_index)
-
-            if self._check_cancelled(task_id):
-                return
-
-            if not frame_path:
-                self.tasks[task_id]['status'] = 'failed'
-                self.tasks[task_id]['error'] = 'Failed to extract frame'
-                self.tasks[task_id]['completed_at'] = datetime.now()
-                self.tasks[task_id]['duration_seconds'] = self._duration_seconds(self.tasks[task_id])
-                self._persist()
-                return
-
-            # ... rest of image generation pipeline ...
-            # (unchanged; completion/failure paths below also set duration)
-
-        except Exception as e:
-            logger.error(f"Image generation error for {task_id}: {e}")
-            task = self.tasks.get(task_id)
-            if task:
-                task['status'] = 'failed'
-                task['error'] = str(e)
-                task['completed_at'] = datetime.now()
-                task['duration_seconds'] = self._duration_seconds(task)
-                self._persist()
-
-    # =========================================================================
-    # Video Generation
-    # =========================================================================
-
-    async def queue_video_generation(self, params: Dict[str, Any]) -> str:
-        """Queue video generation task"""
-        task_id = str(uuid.uuid4())[:8]
-
-        self.tasks[task_id] = {
-            'task_id': task_id,
-            'type': 'video',
-            'status': 'pending',
-            'progress': 0.0,
-            'message': 'Queued',
-            'created_at': datetime.now(),
-            'params': params,
-            'comfy_prompt_id': None,
-        }
-        self._persist()
-
-        # Start async task
-        asyncio.create_task(self._run_video_generation(task_id, params))
-
-        return task_id
-
-    async def _run_video_generation(self, task_id: str, params: Dict[str, Any]):
-        """Run video generation"""
-        try:
-            self.tasks[task_id]['status'] = 'processing'
-            self.tasks[task_id]['message'] = 'Loading models...'
-            self.tasks[task_id]['progress'] = 0.1
-
-            if self._check_cancelled(task_id):
-                return
-
-            # ... video generation pipeline ...
-            # (unchanged; completion/failure paths below also set duration)
-
-        except Exception as e:
-            logger.error(f"Video generation error for {task_id}: {e}")
-            task = self.tasks.get(task_id)
-            if task:
-                task['status'] = 'failed'
-                task['error'] = str(e)
-                task['completed_at'] = datetime.now()
-                task['duration_seconds'] = self._duration_seconds(task)
-                self._persist()
+    def export_tasks(
+        self,
+        status: Optional[str] = None,
+        task_type: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Return all tasks matching the given filters (no pagination), capped at
+        MAX_PERSISTED_TASKS, with datetimes serialized to ISO strings.
+        """
+        tasks = self._filter_tasks(status=status, task_type=task_type, search=search)
+        tasks = tasks[:MAX_PERSISTED_TASKS]
+        return [self._serialize_task(t) for t in tasks]
